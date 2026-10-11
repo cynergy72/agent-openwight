@@ -11,6 +11,8 @@ dependencies = [
     "openai>=1.40",
     "sqlglot>=25",
     "rich>=13",
+    "keyring>=24",
+    "tomlkit>=0.12",
 ]
 
 [project.optional-dependencies]

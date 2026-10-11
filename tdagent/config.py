@@ -49,6 +49,7 @@ class Config:
     agent: AgentConfig = field(default_factory=AgentConfig)
     teradata: TeradataConfig = field(default_factory=TeradataConfig)
     base_dir: Path = field(default_factory=Path.cwd)
+    source: Path = field(default_factory=lambda: Path("config.toml"))  # file to save settings to
 
     def path(self, p: str) -> Path:
         path = Path(p)
@@ -83,8 +84,34 @@ def load_config(path: str | Path | None = None) -> Config:
         agent=_fill(AgentConfig, data.get("agent", {})),
         teradata=_fill(TeradataConfig, data.get("teradata", {})),
         base_dir=path.resolve().parent if path.exists() else Path.cwd(),
+        source=path.resolve(),
     )
     for env, (section, key) in ENV_OVERRIDES.items():
         if os.environ.get(env):
             setattr(getattr(cfg, section), key, os.environ[env])
+    td = cfg.teradata
+    if not td.password:  # TD_PASSWORD / config file win over the OS credential store
+        from .credentials import get_password
+
+        td.password = get_password(td.host, td.user) or ""
     return cfg
+
+
+SAVED_TERADATA_KEYS = ("enabled", "host", "user", "logmech", "databases", "allow_execute", "max_rows")
+
+
+def save_teradata_settings(path: Path, td: TeradataConfig) -> None:
+    """Write the [teradata] section, keeping comments and other sections.
+    The password is never written (it lives in the OS credential store);
+    a password already in the file is removed so it can't shadow the new one."""
+    import tomlkit
+
+    doc = tomlkit.parse(path.read_text(encoding="utf-8")) if path.exists() else tomlkit.document()
+    if "teradata" not in doc:
+        doc.add("teradata", tomlkit.table())
+    section = doc["teradata"]
+    for key in SAVED_TERADATA_KEYS:
+        section[key] = getattr(td, key)
+    if "password" in section:
+        del section["password"]
+    path.write_text(tomlkit.dumps(doc), encoding="utf-8")

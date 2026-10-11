@@ -83,6 +83,11 @@ class TeradataClient:
         except Exception as e:
             raise TeradataError(_clean_error(e)) from e
 
+    def ping(self) -> str:
+        """Connect and return the Teradata version string."""
+        _, rows = self._fetch("SELECT InfoData FROM DBC.DBCInfoV WHERE InfoKey = 'VERSION'")
+        return str(rows[0][0]).strip() if rows else "?"
+
     # ----------------------------------------------------------- agent ops
     def explain(self, sql: str) -> str:
         """Run EXPLAIN. Fails with the real Teradata error if the SQL is invalid

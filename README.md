@@ -82,7 +82,19 @@ tdagent web --port 8600 --no-browser
 | 현재 SQL 첨부 | 켜져 있으면 다음 요청에 현재 SQL 이 같이 전달됨 → "할인율 추가해줘", "왜 느려?" 처럼 이어서 수정·분석 |
 | 버튼 | 검증 · EXPLAIN (Teradata 연결 시) · 실행 (allow_execute 시) · .sql 저장 |
 | 탭 | 검증 결과 · **변경 비교**(이전 버전과 diff) · EXPLAIN 힌트 · 실행 결과 표 |
-| 사이드바 | 새 쿼리(대화 초기화), schema/knowledge 수정 후 다시 읽기 |
+| 사이드바 | 새 쿼리(대화 초기화), schema/knowledge 수정 후 다시 읽기, **Teradata 접속 설정** |
+
+#### Teradata 접속 설정 (사이드바 🔌)
+
+1. Host, User, Password, 인증 방식(TD2/LDAP 등), 데이터베이스를 입력하고 **연결 테스트** (저장하지 않고 접속만 확인)
+2. **저장**: `config.toml` 의 `[teradata]` 에 저장됩니다. 주석과 다른 설정은 그대로 유지됩니다.
+   - **"비밀번호 저장"** 이 체크되어 있으면 비밀번호는 **OS 자격 증명 저장소**(Windows 자격 증명 관리자 / macOS 키체인)에 저장되고, 설정 파일에는 절대 쓰지 않습니다.
+   - 다음부터는 비밀번호 칸이 비어 있고 "저장됨" 으로 표시됩니다. **비워 둔 채 저장하면 기존 비밀번호를 그대로 사용**하고, 바꿀 때만 새로 입력하면 됩니다.
+   - 체크를 해제하고 저장하면 저장된 비밀번호를 삭제합니다 (이번 실행 동안만 기억).
+3. **스키마 가져오기**: 저장된 접속 정보로 DBC 에서 테이블·컬럼·코멘트·PI 를 가져와 `schema/catalog.json` 을 만듭니다.
+
+비밀번호를 읽는 순서는 환경변수 `TD_PASSWORD` → `config.toml` → OS 자격 증명 저장소입니다. CLI 도 저장된 비밀번호를 같이 씁니다.
+OS 자격 증명 저장소가 없는 환경(일부 Linux 서버)에서는 저장되지 않고 이번 실행 동안만 기억합니다.
 
 보안을 위해 웹 서버는 `127.0.0.1` 에만 열립니다 (DB 접속 정보를 가진 앱이므로 다른 PC 에서 접속 불가).
 
@@ -113,7 +125,7 @@ tdagent -v chat                                # 도구 결과까지 보기
 
 - 기본 설정에서는 **쿼리를 실행하지 않습니다** (EXPLAIN과 메타데이터 조회만).
 - `allow_execute = true`여도 단일 SELECT/WITH/HELP/SHOW만 허용하고, 쓰기·DDL 키워드가 있으면 거부하며, 결과는 `max_rows`까지만 가져옵니다.
-- 비밀번호는 환경변수 `TD_PASSWORD`로 넣으세요. `config.toml`은 `.gitignore`에 포함되어 있습니다.
+- 비밀번호는 웹 UI 에서 저장하면 OS 자격 증명 저장소에, 아니면 환경변수 `TD_PASSWORD` 로 넣으세요. 설정 파일에는 쓰지 않습니다 (`config.toml` 은 `.gitignore` 에도 포함).
 
 ## 7. 왜 로컬 웹 UI 인가
 
@@ -133,6 +145,7 @@ tdagent/
   teradata.py  teradatasql 래퍼 (EXPLAIN, DBC 메타데이터, 읽기전용 실행)
   prompts.py   시스템 프롬프트 + Teradata 방언 치트시트
   webapp.py    로컬 웹 UI (Streamlit)
+  credentials.py  비밀번호 저장 (OS 자격 증명 저장소, keyring)
   cli.py       CLI (+ `tdagent web` 실행기)
 ```
 

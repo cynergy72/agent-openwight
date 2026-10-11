@@ -17,10 +17,11 @@ if __package__ in (None, ""):  # executed as a script by `streamlit run`
 
 import streamlit as st
 
+from tdagent import credentials
 from tdagent.agent import Agent, build_agent
-from tdagent.config import load_config
+from tdagent.config import TeradataConfig, load_config, save_teradata_settings
 from tdagent.sql_lint import explain_hints, normalize_sql
-from tdagent.teradata import TeradataError
+from tdagent.teradata import TeradataClient, TeradataError
 
 st.set_page_config(page_title="Teradata SQL Agent", page_icon="🗄️", layout="wide")
 
@@ -49,6 +50,18 @@ def _init_state() -> None:
     }
     for k, v in defaults.items():
         ss.setdefault(k, v)
+    _init_conn_form()
+
+
+def _rebuild_agent(keep_history: bool = True) -> None:
+    """Rebuild after settings/schema changes, keeping the model and chat."""
+    old: Agent = ss.agent
+    if old.toolbox.td:
+        old.toolbox.td.close()
+    new = build_agent(ss.cfg, model=old.model)
+    if keep_history:
+        new.history = old.history
+    ss.agent = new
 
 
 def _set_sql(sql: str) -> None:
@@ -179,10 +192,156 @@ def _sidebar() -> None:
         st.button("🆕 새 쿼리 (대화 초기화)", on_click=_new_query, width="stretch")
         if st.button("🔁 스키마·지식 다시 읽기", width="stretch",
                      help="schema/, knowledge/ 폴더를 수정한 뒤 누르세요. 대화도 초기화됩니다."):
-            ss.agent = build_agent(ss.cfg)
+            _rebuild_agent(keep_history=False)
             _new_query()
             st.rerun()
+        _connection_panel()
         st.caption("요청 입력창에서 Shift+Enter 로 줄바꿈, SQL 을 그대로 붙여넣어도 됩니다.")
+
+
+# --------------------------------------------------------------------------- #
+# Teradata connection settings
+# --------------------------------------------------------------------------- #
+
+LOGMECHS = ["TD2", "LDAP", "TDNEGO", "KRB5"]
+
+
+def _init_conn_form() -> None:
+    if "conn_host" in ss:
+        return
+    td = ss.cfg.teradata
+    ss.conn_enabled = td.enabled
+    ss.conn_host = td.host
+    ss.conn_user = td.user
+    ss.conn_password = ""  # never pre-filled; empty means "keep the current one"
+    ss.conn_save_pw = True
+    ss.conn_logmech = td.logmech or "TD2"
+    ss.conn_databases = ", ".join(td.databases)
+    ss.conn_allow_execute = td.allow_execute
+    ss.conn_max_rows = td.max_rows
+    ss.conn_msg = None
+    ss.conn_saved_cache = {}
+
+
+def _has_saved_password(host: str, user: str) -> bool:
+    key = (host, user)
+    if key not in ss.conn_saved_cache:  # keyring lookups can be slow / prompt; ask once
+        ss.conn_saved_cache[key] = credentials.get_password(host, user) is not None
+    return ss.conn_saved_cache[key]
+
+
+def _form_config() -> TeradataConfig:
+    """TeradataConfig from the form. An empty password field keeps the current
+    password (session or stored) for the same host/user."""
+    cur = ss.cfg.teradata
+    host, user = ss.conn_host.strip(), ss.conn_user.strip()
+    password = ss.conn_password
+    if not password:
+        same = (host, user) == (cur.host, cur.user)
+        password = (cur.password if same else "") or credentials.get_password(host, user) or ""
+    return TeradataConfig(
+        enabled=ss.conn_enabled, host=host, user=user, password=password,
+        logmech=ss.conn_logmech,
+        databases=[d.strip() for d in ss.conn_databases.split(",") if d.strip()],
+        allow_execute=ss.conn_allow_execute, max_rows=int(ss.conn_max_rows),
+    )
+
+
+def _test_connection() -> None:
+    td = _form_config()
+    if not (td.host and td.user and td.password):
+        ss.conn_msg = ("error", "Host, User, 비밀번호가 필요합니다.")
+        return
+    client = TeradataClient(td)
+    try:
+        ss.conn_msg = ("success", f"접속 성공 · Teradata {client.ping()}"
+                       + ("" if ss.conn_password == "" else " · '저장'을 눌러야 적용됩니다"))
+    except TeradataError as e:
+        ss.conn_msg = ("error", str(e))
+    finally:
+        client.close()
+
+
+def _save_connection() -> None:
+    td = _form_config()
+    entered = ss.conn_password
+    notes, level = [], "success"
+    if ss.conn_save_pw:
+        if entered:
+            ok, err = credentials.set_password(td.host, td.user, entered)
+            if ok:
+                notes.append("비밀번호를 OS 자격 증명 저장소에 저장했습니다.")
+            else:
+                level = "warning"
+                notes.append(f"비밀번호를 저장하지 못했습니다 ({err}). 이번 실행 동안만 기억합니다.")
+    elif _has_saved_password(td.host, td.user):
+        credentials.delete_password(td.host, td.user)
+        notes.append("저장된 비밀번호를 삭제했습니다. 이번 실행 동안만 기억합니다.")
+
+    try:
+        save_teradata_settings(ss.cfg.source, td)
+        notes.insert(0, f"{ss.cfg.source.name} 에 저장했습니다 (비밀번호 제외).")
+    except Exception as e:
+        level = "error"
+        notes.insert(0, f"설정 파일 저장 실패: {e}")
+    ss.cfg.teradata = td
+    ss.conn_saved_cache = {}
+    ss.conn_password = ""
+    _rebuild_agent(keep_history=True)
+    ss.conn_msg = (level, " ".join(notes))
+
+
+def _sync_schema() -> None:
+    td, dbs = ss.agent.toolbox.td, ss.cfg.teradata.databases
+    try:
+        with st.spinner(f"{', '.join(dbs)} 메타데이터를 가져오는 중..."):
+            store = td.sync_schema(dbs)
+        target = ss.cfg.path(ss.cfg.agent.schema_dir) / "catalog.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        store.save_json(target)
+        _rebuild_agent(keep_history=True)
+        ss.conn_msg = ("success", f"테이블/뷰 {len(store)}개를 {target.name} 에 저장했습니다.")
+    except TeradataError as e:
+        ss.conn_msg = ("error", f"스키마 가져오기 실패: {e}")
+
+
+def _connection_panel() -> None:
+    td = ss.cfg.teradata
+    with st.expander("🔌 Teradata 접속 설정", expanded=not td.host):
+        if ss.conn_msg:
+            level, text = ss.conn_msg
+            getattr(st, level)(text)
+        st.toggle("Teradata 사용 (EXPLAIN 검증)", key="conn_enabled")
+        st.text_input("Host", key="conn_host", placeholder="tdprod.example.com")
+        st.text_input("User", key="conn_user")
+
+        host, user = ss.conn_host.strip(), ss.conn_user.strip()
+        if _has_saved_password(host, user):
+            hint = "저장됨 · 변경 시에만 입력"
+        elif td.password and (host, user) == (td.host, td.user):
+            hint = "이번 실행만 기억 · 변경 시 입력"
+        else:
+            hint = ""
+        st.text_input("Password", key="conn_password", type="password", placeholder=hint)
+        st.checkbox("비밀번호 저장 (OS 자격 증명 저장소)", key="conn_save_pw",
+                    help="Windows 자격 증명 관리자 / macOS 키체인에 저장합니다. 설정 파일에는 저장하지 않습니다. "
+                         "체크를 해제하고 저장하면 저장된 비밀번호를 삭제합니다.")
+
+        options = LOGMECHS if ss.conn_logmech in LOGMECHS else [ss.conn_logmech, *LOGMECHS]
+        st.selectbox("인증 방식 (logmech)", options, key="conn_logmech")
+        st.text_input("데이터베이스 (쉼표로 구분)", key="conn_databases",
+                      help="스키마 가져오기 대상", placeholder="SALES_DB, CUST_DB")
+        st.checkbox("SELECT 실행 허용 (읽기 전용)", key="conn_allow_execute")
+        st.number_input("실행 시 최대 행 수", min_value=1, max_value=10000, key="conn_max_rows")
+
+        c = st.columns(2)
+        c[0].button("연결 테스트", on_click=_test_connection, width="stretch")
+        c[1].button("저장", on_click=_save_connection, type="primary", width="stretch")
+        if st.button("📥 스키마 가져오기", width="stretch",
+                     disabled=not (ss.agent.toolbox.td and td.databases),
+                     help="저장된 접속 정보로 DBC 에서 테이블·컬럼·코멘트·PI 를 가져와 schema/catalog.json 에 저장"):
+            _sync_schema()
+            st.rerun()
 
 
 def _chat_column() -> None:
