@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tdagent"
+version = "0.1.0"
+description = "Teradata SQL agent powered by a local open-weight LLM"
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=1.40",
+    "sqlglot>=25",
+    "rich>=13",
+]
+
+[project.optional-dependencies]
+teradata = ["teradatasql>=20"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+tdagent = "tdagent.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["tdagent*"]
