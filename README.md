@@ -58,14 +58,35 @@ ollama pull qwen3.8:27b    # 정확한 태그 이름은 Ollama 라이브러리�
 OLLAMA_CONTEXT_LENGTH=32768 ollama serve
 
 # 2) 에이전트
-pip install -e ".[teradata]"      # Teradata 접속이 필요 없으면: pip install -e .
+pip install -e ".[web,teradata]"  # Teradata 접속이 필요 없으면: pip install -e ".[web]"
 cp config.example.toml config.toml
 tdagent doctor                    # LLM / Teradata 연결 확인
+tdagent web                       # 브라우저에서 http://127.0.0.1:8501 이 열림
 ```
 
 vLLM, llama.cpp server, LM Studio 등 **OpenAI 호환 서버**라면 `base_url`만 바꿔서 쓸 수 있습니다.
 
 ## 4. 사용법
+
+### 웹 UI (주로 쓰는 방법)
+
+```bash
+tdagent web                 # http://127.0.0.1:8501 (이 PC 에서만 접속 가능)
+tdagent web --port 8600 --no-browser
+```
+
+| 영역 | 기능 |
+|---|---|
+| 왼쪽 대화 | 자연어 요청. **SQL 을 그대로 붙여넣어도 됨** (Shift+Enter 줄바꿈). 에이전트 작업 과정(도구 호출, 자동 재작성)을 펼쳐 볼 수 있음 |
+| 오른쪽 "현재 SQL" | 에이전트가 만든 최신 쿼리. 문법 강조 + **복사 버튼**. "직접 편집"으로 손보거나 붙여넣기 |
+| 현재 SQL 첨부 | 켜져 있으면 다음 요청에 현재 SQL 이 같이 전달됨 → "할인율 추가해줘", "왜 느려?" 처럼 이어서 수정·분석 |
+| 버튼 | 검증 · EXPLAIN (Teradata 연결 시) · 실행 (allow_execute 시) · .sql 저장 |
+| 탭 | 검증 결과 · **변경 비교**(이전 버전과 diff) · EXPLAIN 힌트 · 실행 결과 표 |
+| 사이드바 | 새 쿼리(대화 초기화), schema/knowledge 수정 후 다시 읽기 |
+
+보안을 위해 웹 서버는 `127.0.0.1` 에만 열립니다 (DB 접속 정보를 가진 앱이므로 다른 PC 에서 접속 불가).
+
+### CLI
 
 ```bash
 tdagent chat                                   # 대화형 (수정 요청을 이어서 할 수 있음)
@@ -94,19 +115,11 @@ tdagent -v chat                                # 도구 결과까지 보기
 - `allow_execute = true`여도 단일 SELECT/WITH/HELP/SHOW만 허용하고, 쓰기·DDL 키워드가 있으면 거부하며, 결과는 `max_rows`까지만 가져옵니다.
 - 비밀번호는 환경변수 `TD_PASSWORD`로 넣으세요. `config.toml`은 `.gitignore`에 포함되어 있습니다.
 
-## 7. CLI만으로 충분할까, UI가 필요할까?
+## 7. 왜 로컬 웹 UI 인가
 
-**지금은 CLI로 시작하는 것을 권장합니다.**
-- 초기에는 프롬프트, 예시 쿼리, 모델을 계속 바꿔가며 **품질을 튜닝하는 기간**입니다. CLI가 가장 빠르게 반복할 수 있습니다.
-- `tdagent check`는 종료 코드를 반환하므로 스크립트나 CI에 바로 붙일 수 있습니다.
-- SQL을 다루는 사용자는 대부분 터미널과 편집기에 익숙합니다.
-
-**다음 경우에는 웹 UI를 추가하세요.**
-- 터미널을 쓰지 않는 현업 분석가에게 배포할 때
-- GPU 서버 한 대에 모델을 올리고 **여러 명이 브라우저로 공유**할 때
-- 결과 표 미리보기, 복사 버튼, 쿼리 이력 공유가 필요할 때
-
-에이전트 핵심(`Agent.run()` + 이벤트 콜백)은 UI와 분리되어 있어서, Streamlit이나 Gradio 화면은 100줄 정도로 붙일 수 있습니다.
+혼자 쓰는 도구라도 SQL 작업의 대부분은 **붙여넣기 → 수정 → 복사**입니다. 이건 터미널보다 브라우저가 편합니다.
+여러 줄 붙여넣기, 복사 버튼, 이전 버전과의 비교, 결과 표가 그 예입니다.
+서버 배포 없이 `tdagent web` 한 줄로 내 PC 에서만 뜨고, CLI 는 빠른 검사(`tdagent check`)나 스크립트용으로 함께 유지합니다.
 
 ## 구조
 
@@ -119,7 +132,8 @@ tdagent/
   schema.py    스키마 카탈로그 (DDL 파싱, JSON, 한글 키워드 검색)
   teradata.py  teradatasql 래퍼 (EXPLAIN, DBC 메타데이터, 읽기전용 실행)
   prompts.py   시스템 프롬프트 + Teradata 방언 치트시트
-  cli.py       CLI
+  webapp.py    로컬 웹 UI (Streamlit)
+  cli.py       CLI (+ `tdagent web` 실행기)
 ```
 
 테스트: `pip install -e ".[dev]" && pytest`

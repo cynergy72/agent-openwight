@@ -7,12 +7,15 @@
     tdagent check q.sql                LLM 없이 린트 (+ EXPLAIN)
     tdagent sync-schema --db SALES_DB  DBC 에서 스키마 카탈로그 생성
     tdagent doctor                     LLM / Teradata 연결 확인
+    tdagent web                        로컬 웹 UI (브라우저)
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -167,6 +170,27 @@ def cmd_sync_schema(cfg: Config, databases: list[str] | None, out: str | None) -
     return 0
 
 
+def cmd_web(config_path: str, port: int, no_browser: bool) -> int:
+    try:
+        import streamlit  # noqa: F401
+    except ImportError:
+        console.print("[red]웹 UI 에는 streamlit 이 필요합니다: pip install -e \".[web]\"[/red]")
+        return 2
+    app = Path(__file__).with_name("webapp.py")
+    env = dict(os.environ, TDAGENT_CONFIG=str(Path(config_path).resolve()))
+    cmd = [sys.executable, "-m", "streamlit", "run", str(app),
+           "--server.address", "127.0.0.1",  # this PC only: the app holds DB credentials
+           "--server.port", str(port),
+           "--server.headless", "true" if no_browser else "false",
+           "--browser.gatherUsageStats", "false",
+           "--client.toolbarMode", "minimal"]
+    console.print(f"[green]http://127.0.0.1:{port} 에서 실행합니다. 종료: Ctrl+C[/green]")
+    try:
+        return subprocess.call(cmd, env=env)
+    except KeyboardInterrupt:
+        return 0
+
+
 def cmd_doctor(cfg: Config) -> int:
     from .llm import OpenAICompatModel
 
@@ -214,8 +238,13 @@ def main(argv: list[str] | None = None) -> int:
     ss.add_argument("--db", nargs="+")
     ss.add_argument("--out")
     sub.add_parser("doctor")
+    w = sub.add_parser("web")
+    w.add_argument("--port", type=int, default=8501)
+    w.add_argument("--no-browser", action="store_true", help="브라우저를 자동으로 열지 않음")
 
     args = p.parse_args(argv)
+    if args.cmd == "web":
+        return cmd_web(args.config, args.port, args.no_browser)
     cfg = load_config(args.config)
 
     if args.cmd in (None, "chat"):
