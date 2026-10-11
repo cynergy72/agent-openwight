@@ -12,21 +12,23 @@ SELECT TOP 10 c.GRADE_CD, SUM(t.SALE_AMT) AS amt ...
 ╭─ 자동 검증 ─ 결과: 통과 (오류 0, 경고 0) ─╮
 ```
 
-## 1. 모델 선택: `qwen3-coder:30b` (Qwen3-Coder-30B-A3B-Instruct)
+## 1. 모델 선택: Qwen3.8-27B (`qwen3.8:27b`)
 
 | 후보 | 크기 | 판단 |
 |---|---|---|
-| **Qwen3-Coder-30B-A3B** ✅ | 30B MoE (활성 3.3B), Q4 약 19GB | 코드 특화 + 에이전트용 도구 호출 학습. 활성 파라미터가 작아 **빠름**. 긴 컨텍스트 지원. 한국어 이해 양호 |
-| gpt-oss-20b | 21B MoE, 약 14GB | 도구 호출 우수, 더 가벼움. GPU 메모리가 16GB 이하면 1순위 대안 |
-| Devstral Small (24B) | 24B dense | 에이전트 코딩 특화. dense 라서 느림 |
-| Gemma 3 27B | 27B dense | 한국어는 좋지만 네이티브 도구 호출이 약함 |
+| **Qwen3.8-27B** ✅ | 27B dense, Q4 약 17GB | 2026년 8월 출시, Apache 2.0, 26만 토큰 컨텍스트. 코딩 성능이 직전 세대보다 크게 향상 (Qwen 공개 기준 SWE-bench Pro 61.7, Qwen3.6-27B는 53.5) |
+| Qwen3-Coder-30B-A3B | 30B MoE (활성 3.3B), Q4 약 19GB | 2025년 모델이라 정확도는 낮지만 **훨씬 빠름**. Qwen3.8 응답이 너무 느리면 1순위 대안 |
+| gpt-oss-20b | 21B MoE, 약 14GB | 도구 호출 양호, 가벼움. GPU 메모리가 16GB 이하일 때 |
 
 선정 이유는 다음과 같습니다.
-- SQL 생성은 **코드 생성**이라 코드 특화 모델이 유리합니다.
-- 에이전트는 한 요청에 LLM을 4~8번 부릅니다. **속도(활성 파라미터)**가 체감 품질을 좌우하는데, MoE 구조라 30B급 품질을 3B급 속도로 냅니다.
-- 도구 호출(function calling)이 안정적이어야 루프가 깨지지 않습니다.
+- SQL 에이전트는 빠른 것보다 **틀리지 않는 것**이 중요합니다. 31B 미만에서 가장 최신이고 코딩 성능이 가장 좋은 모델입니다.
+- GPU 한 장(24GB면 컨텍스트까지 여유)에 올라갑니다.
 
-모델은 `config.toml`의 `model` 한 줄로 바꿀 수 있습니다. **팀의 실제 쿼리 10~20개로 후보 모델들을 직접 비교**해 보시길 권합니다.
+**속도 주의:** dense 모델이라 토큰마다 27B 전체를 계산합니다. 활성 파라미터가 3.3B인 MoE 모델보다 생성 속도가 몇 배 느립니다. 에이전트는 요청 하나에 모델을 4~8번 부르므로, 응답 시간이 길게 느껴질 수 있습니다.
+
+**thinking 모드:** Qwen3.x는 답하기 전에 추론(thinking)을 할 수 있습니다. 정확도에는 도움이 되지만 더 느려집니다. `max_tokens`를 넉넉하게(기본 8192) 잡아두었고, `<think>` 내용은 답변에서 자동으로 제거합니다. 속도가 더 중요하면 서버 설정이나 `[llm.extra_body]`로 thinking을 끌 수 있습니다 (`config.example.toml` 참고).
+
+모델은 `config.toml`의 `model` 한 줄로 바꿀 수 있습니다. **팀의 실제 쿼리 10~20개로 Qwen3.8-27B와 qwen3-coder:30b를 직접 비교**해 보시길 권합니다.
 
 ## 2. 작은 모델의 약점을 코드로 보완한 방법
 
@@ -51,7 +53,7 @@ SELECT TOP 10 c.GRADE_CD, SUM(t.SALE_AMT) AS amt ...
 
 ```bash
 # 1) 모델 서버 (Ollama 예시)
-ollama pull qwen3-coder:30b
+ollama pull qwen3.8:27b    # 정확한 태그 이름은 Ollama 라이브러리에서 확인
 # 중요: Ollama 기본 컨텍스트는 작아서 시스템 프롬프트와 스키마가 잘립니다. 32K 이상으로 실행하세요.
 OLLAMA_CONTEXT_LENGTH=32768 ollama serve
 

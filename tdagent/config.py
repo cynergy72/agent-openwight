@@ -11,11 +11,14 @@ from pathlib import Path
 @dataclass
 class LLMConfig:
     base_url: str = "http://localhost:11434/v1"
-    model: str = "qwen3-coder:30b"
+    model: str = "qwen3.8:27b"
     api_key: str = "ollama"
     temperature: float = 0.1
-    max_tokens: int = 4096
+    max_tokens: int = 8192
     timeout: float = 300
+    # server-specific request fields, e.g. to turn thinking off on vLLM:
+    # {"chat_template_kwargs": {"enable_thinking": false}}
+    extra_body: dict = field(default_factory=dict)
 
 
 @dataclass

@@ -68,6 +68,7 @@ class OpenAICompatModel:
             tools=tools or None,
             temperature=self.cfg.temperature,
             max_tokens=self.cfg.max_tokens,
+            extra_body=self.cfg.extra_body or None,
         )
         msg = resp.choices[0].message
         content = _THINK.sub("", msg.content or "").strip()
