@@ -1,0 +1,13 @@
+  1) First, we lock SALES_DB.CUSTOMER in TD_MAP1 for write on a
+     reserved RowHash to prevent global deadlock.
+  2) Next, we lock SALES_DB.CUSTOMER in TD_MAP1 for write.
+  3) We do an all-AMPs DELETE step in TD_MAP1 from SALES_DB.CUSTOMER by
+     way of full table deletion with no residual conditions.  The size
+     is estimated with high confidence to be 747 rows.  The estimated
+     time for this step is 0.97 seconds.
+  4) We do an INSERT step into SALES_DB.LOAD_LOG.  The estimated time
+     for this step is 0.02 seconds.
+  5) We spoil the parser's dictionary cache for the table.
+  6) Finally, we send out an END TRANSACTION step to all AMPs involved
+     in processing the request.
+  -> No rows are returned to the user as the result of statement 1.

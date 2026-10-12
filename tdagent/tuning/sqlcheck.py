@@ -3,6 +3,7 @@ plus helpers the recommendations and the rewrite guard share."""
 
 from __future__ import annotations
 
+import logging
 import re
 
 import sqlglot
@@ -14,6 +15,8 @@ from sqlglot.optimizer.scope import traverse_scope
 from ..schema import SchemaStore, Table
 from ..sql_lint import strip_comments_and_strings
 from .findings import Finding
+
+logging.getLogger("sqlglot").setLevel(logging.ERROR)  # EXEC/CALL etc. fall back to Command with a warning
 
 _CMP = (exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE)
 _RANGE = (exp.GT, exp.GTE, exp.LT, exp.LTE, exp.Between)

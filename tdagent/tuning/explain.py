@@ -17,6 +17,14 @@ that the parser has to cope with:
   * plans without `The total estimated time is ...` (e.g. `-> As the result of
     statement 1.`) - the total then falls back to the sum of the step times
   * an IPE preamble ("eligible for incremental planning and execution")
+  * DIAGNOSTIC HELPSTATS output: statements wrapped over several lines,
+    COLLECT SUMMARY STATISTICS, (High|Medium|Low Confidence), and separate
+    blocks FOR FINAL PLAN / FOR OTHER PLANS
+  * DML steps: `MERGE step into T from Spool n`, `INSERT step into T` (no AMP
+    scope), `DELETE ... by way of full table deletion`
+  * QueryGrid: `executing table operator TD_SYSFNLIB.QGINITIATORIMPORT` with a
+    `< BEGIN EXPLAIN FOR REMOTE QUERY --> ... <-- END EXPLAIN FOR REMOTE QUERY >`
+    block (the remote system's own plan) inside the step
 """
 
 from __future__ import annotations
@@ -28,8 +36,12 @@ _NAME = r'(?:"[^"]+"|[A-Za-z_$#][\w$#]*)'
 _TABLE = rf"{_NAME}\.{_NAME}"
 
 _STEP_START = re.compile(r"^(\s*)(\d+)\)\s+(.*)$")
-_AMPS_OP = re.compile(r"we do an? (all-AMPs?|single-AMP|group-AMPs?|two-AMP|few-AMPs?)\s+(.+?)\s+"
-                      r"(?:step|into|from)\b", re.I)
+_AMPS_OP = re.compile(r"we do an? (?:(all-AMPs?|single-AMP|group-AMPs?|two-AMP|few-AMPs?)\s+)?([A-Z][A-Za-z ]*?)\s+"
+                      r"step\b", re.I)
+_TARGET = re.compile(rf"\binto\s+(?P<table>{_TABLE})", re.I)
+_TABLE_OPERATOR = re.compile(r"executing table operator\s+([\w$#.]+)", re.I)
+_REMOTE = re.compile(r"<\s*BEGIN EXPLAIN FOR REMOTE QUERY\s*-+>(.*?)<-+\s*END EXPLAIN FOR REMOTE QUERY\s*>", re.I | re.S)
+_REMOTE_TOKEN = re.compile(r"\[REMOTE PLAN (\d+)\]")
 _SCAN = re.compile(rf"\b(?P<verb>from|joined to)\s+(?:(?P<parts>\d+|a single|all) partitions? of\s+)?"
                    rf"(?P<table>{_TABLE}|Spool \d+)(?:\s+in view\s+(?P<view>{_NAME}(?:\.{_NAME})?))?", re.I)
 _BY_WAY = re.compile(r"by way of (an all-rows scan|the unique primary index|the primary index|a RowHash match scan|"
@@ -45,7 +57,9 @@ _EST_ANY = re.compile(r"estimated with (high|low|no|index join) confidence to be
                       re.I)
 _STEP_TIME = re.compile(r"estimated time for this step is (.+?)(?:\.\s|\.$|$)", re.I)
 _TOTAL_TIME = re.compile(r"total estimated time is (.+?)(?:\.\s|\.$|$)", re.I | re.M)
-_HELPSTATS = re.compile(r"(COLLECT STATISTICS[^\"\n;]*)", re.I)
+_HELPSTATS_BLOCK = re.compile(r"BEGIN RECOMMENDED STATS FOR ([A-Z ]+?)\s*->(.*?)(?:<-\s*END RECOMMENDED STATS[^\n]*|\Z)",
+                              re.I | re.S)
+_HELPSTATS = re.compile(r'"\s*(COLLECT\s+(?:SUMMARY\s+)?STATISTICS\b.*?)"\s*(?:\(\s*(\w+)\s+Confidence\s*\))?', re.I | re.S)
 _SPOOL_IN = re.compile(r"\b(?:from|joined to)\s+Spool (\d+)", re.I)
 _SPOOL_OUT = re.compile(r"\b(?:into|placed in|put into|goes into)\s+Spool (\d+)", re.I)
 _TOP = re.compile(r"retrieve the TOP (\d+) rows", re.I)
@@ -139,6 +153,9 @@ class Step:
     est_bytes: int | None = None
     est_time: float | None = None
     top_n: int | None = None
+    target: str = ""                 # table written by MERGE/INSERT/UPDATE/DELETE steps
+    table_operator: str = ""         # e.g. TD_SYSFNLIB.QGINITIATORIMPORT (QueryGrid)
+    remote: "RemotePlan | None" = None
     inputs: list[int] = field(default_factory=list)    # spool numbers read
     outputs: list[int] = field(default_factory=list)   # spool numbers written
     input_rows: list[int | None] = field(default_factory=list)  # filled from upstream steps
@@ -194,11 +211,57 @@ class Step:
             bits.append(geo)
         if self.est_rows is not None:
             bits.append(f"{self.est_rows:,} rows/{self.confidence or '?'} conf")
+        if self.target:
+            bits.append(f"→ {self.target}")
+        if self.table_operator:
+            bits.append(f"table operator {self.table_operator}")
+        if self.remote is not None:
+            r = self.remote
+            bits.append(f"원격[{', '.join(r.objects) or '?'}{' 전체 스캔' if r.full_scan else ''}"
+                        f"{'' if r.filtered else ', 조건 없음'}"
+                        + (f", 원격 추정 {r.cardinality:,}행" if r.cardinality is not None else "") + "]")
         if self.top_n is not None:
             bits.append(f"TOP {self.top_n}")
         if self.est_time is not None:
             bits.append(f"{self.est_time:g}s")
         return " · ".join(bits)
+
+
+@dataclass
+class HelpStat:
+    statement: str        # COLLECT ... ON db.t;
+    confidence: str = ""  # High | Medium | Low
+    section: str = ""     # final | other  (FOR FINAL PLAN / FOR OTHER PLANS)
+
+    @property
+    def columns(self) -> list[str]:
+        m = re.search(r"COLUMN\s*\((.*?)\)", self.statement, re.I)
+        return [c.strip() for c in m.group(1).split(",")] if m else []
+
+    @property
+    def table(self) -> str:
+        m = re.search(r"\bON\s+([\w$#.\"]+)", self.statement, re.I)
+        return m.group(1).rstrip(";") if m else ""
+
+    @property
+    def summary_stats(self) -> bool:
+        return bool(re.match(r"COLLECT\s+SUMMARY", self.statement, re.I))
+
+    @property
+    def priority(self) -> tuple:
+        conf = {"high": 0, "medium": 1, "low": 2}.get(self.confidence.lower(), 1)
+        return (0 if self.section != "other" else 1, conf, len(self.columns) if self.columns else 0)
+
+
+@dataclass
+class RemotePlan:
+    """The remote system's plan embedded in a QueryGrid step."""
+    raw: str
+    sql: str = ""
+    full_scan: bool = False
+    filtered: bool = False
+    cardinality: int | None = None
+    objects: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -210,6 +273,7 @@ class ParsedExplain:
     total_time_source: str = ""     # explain | steps (sum of step times) | ""
     notes: list[str] = field(default_factory=list)
     spool_rows: dict[int, int] = field(default_factory=dict)
+    helpstats_detail: list[HelpStat] = field(default_factory=list)
 
     def step(self, label: str) -> Step | None:
         return next((s for s in self.steps if s.label == label), None)
@@ -256,8 +320,15 @@ def _parse_step(label: str, text: str) -> Step:
     masked = _QUOTED.sub('""', text)   # conditions/index predicates out of the way
     m = _AMPS_OP.search(masked)
     if m:
-        st.amps, st.op = m.group(1), m.group(2).strip().upper()
+        st.amps, st.op = m.group(1) or "", m.group(2).strip().upper()
         st.op = re.sub(r"\s+IN TD_\w+$", "", st.op)
+    if st.op in ("MERGE", "INSERT", "UPDATE", "DELETE", "UPSERT", "MERGE DELETE", "MERGE UPDATE"):
+        t = _TARGET.search(masked)
+        if t:
+            st.target = t.group("table").replace('"', "")
+    m = _TABLE_OPERATOR.search(masked)
+    if m:
+        st.table_operator = m.group(1)
     if not re.search(r"\bwe lock\b", masked, re.I) or st.op:
         depth = _depths(masked)
         for m in _SCAN.finditer(masked):
@@ -271,7 +342,8 @@ def _parse_step(label: str, text: str) -> Step:
             access = ""
             if way:
                 w = way.group(1).lower()
-                access = ("all-rows" if "all-rows" in w else "unique primary index" if "unique primary" in w
+                access = ("all-rows" if "all-rows" in w else "full table deletion" if "full table deletion" in w
+                          else "unique primary index" if "unique primary" in w
                           else "primary index" if "primary index" in w else "rowhash" if "rowhash" in w
                           else "hash value" if "hash value" in w else "index" if "index" in w else w.strip())
             parts = (m.group("parts") or "").lower()
@@ -328,17 +400,66 @@ def _spool_sizes(steps: list[Step]) -> dict[int, int]:
     return sizes
 
 
+def _normalize_stat(stmt: str) -> str:
+    s = re.sub(r"\s+", " ", stmt).strip().rstrip(".;")
+    s = re.sub(r"\(\s*", "(", s)
+    s = re.sub(r"\s*\)", ")", s)
+    s = re.sub(r"\s*,\s*", ", ", s)
+    return s + ";"
+
+
+def _parse_helpstats(tail: str) -> list[HelpStat]:
+    out: list[HelpStat] = []
+    blocks = _HELPSTATS_BLOCK.findall(tail) or [("", tail)]
+    for name, body in blocks:
+        section = "other" if "OTHER" in name.upper() else "final"
+        for stmt, conf in _HELPSTATS.findall(body):
+            hs = HelpStat(statement=_normalize_stat(stmt), confidence=(conf or "").capitalize(), section=section)
+            if all(h.statement.upper() != hs.statement.upper() for h in out):
+                out.append(hs)
+    if not out:  # older/unquoted form: one statement per line
+        for stmt in re.findall(r"(COLLECT\s+(?:SUMMARY\s+)?STATISTICS[^\"\n;]*)", tail, re.I):
+            out.append(HelpStat(statement=_normalize_stat(stmt)))
+    return sorted(out, key=lambda h: h.priority)
+
+
+def _parse_remote(raw: str) -> RemotePlan:
+    flat = re.sub(r"\s+", " ", raw).strip()
+    rp = RemotePlan(raw=raw.strip())
+    m = re.search(r"Query steps:\s*(.*?)(?:Remote Queries:|$)", flat, re.I)
+    if m:
+        rp.sql = re.sub(r"/\*.*?\*/", "", m.group(1)).strip()
+    # Oracle-style plan rows (Operation=TABLE ACCESS, Options=FULL ...), generic "TableScan" for other engines
+    rp.full_scan = bool(re.search(r"Operation=TABLE ACCESS,\s*Options=FULL|\bTableScan\b|\bFull Table Scan\b", flat, re.I))
+    preds = re.findall(r"(?:Access|Filter)_Predicates=([^,\]]*)", flat)
+    rp.filtered = any(p.strip() for p in preds) or bool(re.search(r"\bWHERE\b", rp.sql, re.I))
+    cards = [int(c) for c in re.findall(r"Cardinality=(\d+)", flat)]
+    rp.cardinality = cards[0] if cards else None
+    rp.objects = list(dict.fromkeys(
+        f"{o}.{n}" for o, n in re.findall(r"Object_Owner=([\w$#]+), Object_Name=([\w$#]+)", flat)))
+    if not rp.objects and rp.sql:
+        rp.objects = list(dict.fromkeys(re.findall(r"\bFROM\s+([\w$#]+\.[\w$#]+)", rp.sql, re.I)))
+    return rp
+
+
 def parse_explain(text: str) -> ParsedExplain:
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    cut = re.search(r"BEGIN RECOMMENDED STATS", text, re.I)
-    plan_text = text[: cut.start()] if cut else text
-    helpstats = []
-    if cut:
-        for h in _HELPSTATS.findall(text[cut.start():]):
-            stmt = re.sub(r"\s+", " ", h).strip().rstrip(".") + ";"
-            if stmt not in helpstats:
-                helpstats.append(stmt)
+    remotes: list[RemotePlan] = []
+
+    def _stash(m: re.Match) -> str:
+        remotes.append(_parse_remote(m.group(1)))
+        return f" [REMOTE PLAN {len(remotes) - 1}] "
+
+    text_wo_remote = _REMOTE.sub(_stash, text)
+    cut = re.search(r"BEGIN RECOMMENDED STATS", text_wo_remote, re.I)
+    plan_text = text_wo_remote[: cut.start()] if cut else text_wo_remote
+    detail = _parse_helpstats(text_wo_remote[cut.start():]) if cut else []
+    helpstats = [h.statement for h in detail]
     steps = [_parse_step(label, body) for label, body in _split_steps(plan_text)]
+    for st in steps:
+        m = _REMOTE_TOKEN.search(st.text)
+        if m:
+            st.remote = remotes[int(m.group(1))]
     sizes = _spool_sizes(steps)
     spool_tables: dict[int, list[str]] = {}
     for st in steps:
@@ -359,8 +480,10 @@ def parse_explain(text: str) -> ParsedExplain:
         times = [s.est_time for s in steps if s.est_time is not None]
         if times:
             total, source = sum(times), "steps"
+    if remotes:
+        notes.append(f"QueryGrid 원격 조회 {len(remotes)}건 (원격 시스템 실행 계획 포함)")
     return ParsedExplain(steps=steps, total_time=total, helpstats=helpstats, raw=text,
-                         total_time_source=source, notes=notes, spool_rows=sizes)
+                         total_time_source=source, notes=notes, spool_rows=sizes, helpstats_detail=detail)
 
 
 def plan_metrics(p: ParsedExplain, partitioned: set[str] | None = None) -> dict:

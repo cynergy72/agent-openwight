@@ -242,6 +242,10 @@ def cmd_tune(cfg: Config, args) -> int:
             (out / "suggested_unverified.sql").write_text(unverified.sql + "\n", encoding="utf-8")
         if r.recommendations.stats:
             (out / "collect_stats.sql").write_text("\n".join(r.recommendations.stats) + "\n", encoding="utf-8")
+        if r.recommendations.stats_optional:
+            (out / "collect_stats_optional.sql").write_text(
+                "\n".join(f"{s}  -- {r.recommendations.stats_reasons.get(s, '')}" for s in r.recommendations.stats_optional)
+                + "\n", encoding="utf-8")
         console.print(f"[green]{out}/ 에 저장했습니다.[/green]")
     style = "green" if r.goal_met else "yellow"
     console.print(f"[{style}]{'목표 달성' if r.goal_met else '목표 미달성'} · {r.stop_reason}[/{style}]")

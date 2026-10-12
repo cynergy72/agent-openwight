@@ -1,0 +1,53 @@
+ This request is eligible for incremental planning and execution (IPE)
+ but does not meet cost thresholds. The following is the static plan
+ for the request.
+  1) First, we lock SALES_DB.SALES_TXN in TD_MAP1 for access, and we
+     lock SALES_DB.SALES_SUMMARY in TD_MAP1 for write.
+  2) Next, we do an all-AMPs SUM step in TD_MAP1 to aggregate from
+     SALES_DB.SALES_TXN by way of an all-rows scan with a condition of
+     ("(SALES_DB.SALES_TXN.CHANNEL_CD = 'ON') AND
+     (SALES_DB.SALES_TXN.PROD_ID = 1001)").  Aggregate intermediate
+     results are computed globally, then placed in Spool 2 in TD_Map1.
+     The size of Spool 2 is estimated with high confidence to be 1 row
+     (17 bytes).  The estimated time for this step is 0.63 seconds.
+  3) We do an all-AMPs RETRIEVE step in TD_Map1 from Spool 2 (Last Use)
+     by way of an all-rows scan into Spool 6 (all_amps), which is
+     duplicated on all AMPs in TD_Map1.  The size of Spool 6 is
+     estimated with high confidence to be 6 rows (90 bytes).  The
+     estimated time for this step is 0.01 seconds.
+  4) We do an all-AMPs JOIN step in TD_Map1 from Spool 6 (Last Use) by
+     way of an all-rows scan, which is joined to SALES_DB.SALES_TXN by
+     way of an all-rows scan with a condition of
+     ("(SALES_DB.SALES_TXN.CHANNEL_CD = 'ON')") locking
+     SALES_DB.SALES_TXN for access.  Spool 6 and SALES_DB.SALES_TXN are
+     joined using a product join, with a join condition of (
+     "SALES_DB.SALES_TXN.QTY = Field_2").  The result goes into Spool 1
+     (group_amps), which is built locally on the AMPs.  The size of
+     Spool 1 is estimated with no confidence to be 208 rows (896,896
+     bytes).  The estimated time for this step is 0.62 seconds.
+  5) We do an all-AMPs MERGE step in TD_MAP1 into SALES_DB.SALES_SUMMARY
+     from Spool 1 (Last Use).  The size is estimated with high
+     confidence to be 208 rows.  The estimated time for this step is
+     0.30 seconds.
+  6) We spoil the parser's dictionary cache for the table.
+  7) Finally, we send out an END TRANSACTION step to all AMPs involved
+     in processing the request.
+  -> No rows are returned to the user as the result of statement 1.
+     BEGIN RECOMMENDED STATS FOR FINAL PLAN->
+     -- "COLLECT STATISTICS COLUMN (QTY) ON SALES_DB.SALES_TXN" (High
+     Confidence)
+     -- "COLLECT STATISTICS COLUMN (CHANNEL_CD ,PROD_ID) ON
+     SALES_DB.SALES_TXN" (High Confidence)
+     -- "COLLECT STATISTICS COLUMN (CUST_ID ,PROD_ID ,SALE_DT ,QTY
+     ,CHANNEL_CD ,SALE_AMT) ON SALES_DB.SALES_TXN" (High Confidence)
+     -- "COLLECT STATISTICS COLUMN (DATABASENAME ,DATABASEID) ON
+     DBC.dbase" (Medium Confidence)
+     -- "COLLECT STATISTICS COLUMN (PROD_ID) ON SALES_DB.SALES_TXN"
+     (Medium Confidence)
+     <- END RECOMMENDED STATS FOR FINAL PLAN
+     BEGIN RECOMMENDED STATS FOR OTHER PLANS ->
+     -- "COLLECT SUMMARY STATISTICS ON SALES_DB.PRODUCT" (High
+     Confidence)
+     -- "COLLECT STATISTICS COLUMN (CATEGORY_CD) ON SALES_DB.PRODUCT"
+     (High Confidence)
+     <- END RECOMMENDED STATS FOR OTHER PLANS

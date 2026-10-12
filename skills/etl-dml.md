@@ -26,6 +26,8 @@ DML 은 변경 행마다 트랜잭션 저널(TJ, 롤백용 이미지)을 남겨 
 ## TP-ETL-04 전체 삭제
 - 신호: `DELETE FROM t WHERE 1=1` 또는 조건 없는 DELETE 를 트랜잭션 중간에 실행
 - 조치(A): `DELETE FROM t ALL;` (또는 조건 없는 DELETE) 를 트랜잭션의 마지막 문장으로 → 행 단위 저널 없이 빠름.
+- 확인: EXPLAIN 에 `by way of full table deletion` 이 나오면 빠른 전체 삭제가 적용된 것.
+  INSERT-SELECT 는 `MERGE step into 대상테이블 from Spool n` 으로 나온다 (대상이 비어 있으면 빠른 경로).
 
 ## TP-ETL-05 SET 테이블 적재
 - primary-index-design TP-PI-02 참조. 대량 적재 대상은 MULTISET + 원천에서 중복 제거가 일반적으로 빠르다.

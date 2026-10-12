@@ -248,6 +248,11 @@ def _recs_tab(r: TuningReport) -> None:
                      width="stretch")
         st.download_button("💾 통계 스크립트 저장", "\n".join(rec.stats) + "\n", file_name="collect_stats.sql",
                            mime="text/plain")
+    if rec.stats_optional:
+        with st.expander(f"선택 검토 통계 {len(rec.stats_optional)}건 (우선순위 낮음 · 수집 비용 큼 · DBA 영역)"):
+            st.code("\n".join(rec.stats_optional), language="sql")
+            st.dataframe([{"문장": s, "근거": rec.stats_reasons.get(s, "")} for s in rec.stats_optional],
+                         hide_index=True, width="stretch")
     if rec.partition_candidates:
         st.markdown("**파티션 추가 후보 (등급 C)**")
         for t, c in rec.partition_candidates:
@@ -256,7 +261,7 @@ def _recs_tab(r: TuningReport) -> None:
         st.markdown("**PI 검토 후보 (등급 C)**")
         for t, c in rec.pi_candidates:
             st.markdown(f"- `{t}` — 조인/재분배 키 `{c}`")
-    if not (rec.stats or rec.partition_candidates or rec.pi_candidates):
+    if not (rec.stats or rec.stats_optional or rec.partition_candidates or rec.pi_candidates):
         st.caption("코드가 계산한 권고 후보가 없습니다.")
 
 

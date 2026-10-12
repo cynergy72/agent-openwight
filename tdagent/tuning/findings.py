@@ -32,6 +32,8 @@ FINDING_INFO: dict[str, tuple[str, str, list[str], str]] = {
     "STATS_RECOMMENDED": ("옵티마이저 통계 권고 (HELPSTATS)", "info", ["TP-STAT-03"], "B"),
     "LARGE_SPOOL": ("대용량 스풀", "warning", ["TP-RES-01", "TP-RW-01"], "A"),
     "SKEWED_REDISTRIBUTION": ("소수 AMP 로 재분배 (스큐)", "warning", ["TP-SKEW-06", "TP-SKEW-02"], "A"),
+    "REMOTE_QUERY": ("QueryGrid 원격 조회", "info", ["TP-QG-01", "TP-QG-04"], "A"),
+    "REMOTE_FULL_TRANSFER": ("원격 테이블 전체 전송", "warning", ["TP-QG-02", "TP-QG-03"], "A"),
     "HOTSPOT_STEP": ("병목 단계", "info", ["TP-EXP-01"], "A"),
     # SQL patterns (sqlcheck.py)
     "COMMA_JOIN": ("콤마 조인 / 조인 조건 누락 위험", "warning", ["TP-JOIN-01"], "A"),
@@ -135,8 +137,10 @@ def _product_join(s, share: float) -> Finding:
     inputs = " × ".join("?" if r is None else f"{r:,}" for r in s.input_rows) or "?"
     detail = f"{s.join_type + ' ' if s.join_type not in ('', 'inner') else ''}{s.join_method} join, " \
              f"입력 {inputs}행 → 결과 {rows:,}행"
-    if s.small_product_join and share < 0.2:
-        return Finding("PRODUCT_JOIN", detail + " (한쪽이 아주 작아 대개 정상)", evidence=s.join_condition or s.summary(),
+    if s.small_product_join:
+        # a handful of (usually duplicated) rows against the other side: the step's time is the scan, not the join
+        note = " (한쪽이 아주 작아 대개 정상" + (f", 단계 시간 비중 {share:.0%}은 주로 스캔 비용" if share >= 0.2 else "") + ")"
+        return Finding("PRODUCT_JOIN", detail + note, evidence=s.join_condition or s.summary(),
                        step=s.label, tables=s.lineage, severity="info")
     big = (cmp is not None and cmp >= 1_000_000_000) or (cmp is None and rows >= 100_000) or share >= 0.2
     return Finding("PRODUCT_JOIN", detail, evidence=s.join_condition or s.summary(), step=s.label,
@@ -186,7 +190,10 @@ def from_explain(p: ParsedExplain, cfg: TuningConfig, partitioned: set[str] | No
                     out.append(Finding("NON_SARGABLE", "전체 스캔 단계의 조건에서 컬럼이 함수로 감싸져 있습니다",
                                        evidence=cond[:400], step=s.label, tables=s.tables))
                     break
-        if s.confidence == "no" and (rows >= cfg.stats_min_rows or share >= 0.1):
+        remote = s.remote is not None or "QGINITIATOR" in s.table_operator.upper()
+        if remote:
+            pass  # remote row counts can't be fixed with local statistics - reported as REMOTE_QUERY
+        elif s.confidence == "no" and (rows >= cfg.stats_min_rows or share >= 0.1):
             no_conf.append(s)
         elif s.confidence == "low" and rows >= cfg.scan_rows:
             low_conf.append(s)
@@ -204,13 +211,40 @@ def from_explain(p: ParsedExplain, cfg: TuningConfig, partitioned: set[str] | No
             out.append(Finding(code, f"{len(steps)}개 단계가 통계 없이/부족하게 추정됨: {listed}{more}",
                                evidence="\n".join(st.summary() for st in steps[:5]), tables=tables))
 
+    for s in p.steps:
+        r = s.remote
+        if r is None and "QGINITIATOR" not in s.table_operator.upper():
+            continue
+        objs = ", ".join(r.objects) if r and r.objects else "원격 테이블"
+        est = ""
+        if r and r.cardinality is not None and s.est_rows:
+            ratio = max(s.est_rows, 1) / max(r.cardinality, 1)
+            if ratio >= 10 or ratio <= 0.1:
+                est = f" · Teradata 추정 {s.est_rows:,}행({s.confidence or '?'} conf) vs 원격 추정 {r.cardinality:,}행"
+        out.append(Finding("REMOTE_QUERY", f"{s.table_operator or 'QueryGrid'} 로 {objs} 를 가져옵니다{est}",
+                           evidence=(r.sql if r else s.summary())[:400], step=s.label, tables=r.objects if r else []))
+        if r and r.full_scan and not r.filtered:
+            out.append(Finding("REMOTE_FULL_TRANSFER",
+                               f"원격 시스템에서 {objs} 를 조건 없이 전체 스캔해 전송합니다"
+                               + (f" (원격 추정 {r.cardinality:,}행)" if r.cardinality is not None else ""),
+                               evidence=r.sql[:400], step=s.label, tables=r.objects,
+                               severity="warning"))
+
     hot = p.hotspot
     if hot and total and hot.est_time and hot.est_time / total >= 0.5 and len(p.steps) > 2:
         out.append(Finding("HOTSPOT_STEP", f"전체 예상 시간의 {hot.est_time / total:.0%} 가 이 단계",
                            evidence=hot.summary(), step=hot.label, tables=hot.lineage))
     if p.helpstats:
-        out.append(Finding("STATS_RECOMMENDED", f"옵티마이저가 통계 {len(p.helpstats)}건을 권고",
-                           evidence="\n".join(p.helpstats[:10])))
+        d = p.helpstats_detail
+        breakdown = ""
+        if d:
+            conf = {c: sum(1 for h in d if h.confidence == c) for c in ("High", "Medium", "Low")}
+            other = sum(1 for h in d if h.section == "other")
+            breakdown = " (" + ", ".join(f"{k} {v}" for k, v in conf.items() if v) + \
+                        (f", 다른 계획용 {other}" if other else "") + ")"
+        tables = list(dict.fromkeys(h.table for h in d if h.table)) if d else []
+        out.append(Finding("STATS_RECOMMENDED", f"옵티마이저가 통계 {len(p.helpstats)}건을 권고{breakdown}",
+                           evidence="\n".join(p.helpstats[:10]), tables=tables))
     return out
 
 

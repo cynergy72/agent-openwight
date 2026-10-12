@@ -4,7 +4,7 @@ The fixtures copy the phrasing of real TD 20.0 EXPLAIN output (view aliases,
 unnamed spool sizes, few-AMP redistribution, outer joins, missing totals ...)
 with the example schema's names. To check a real extract as well, run:
 
-    TDAGENT_EXPLAIN_CORPUS=/path/teradata_explain_top50.txt pytest tests/test_explain_td20.py
+    TDAGENT_EXPLAIN_CORPUS=/path/top50.txt:/path/helpstats.txt pytest tests/test_explain_td20.py
 """
 
 import os
@@ -113,6 +113,83 @@ def test_extract_loader(tmp_path):
 
 @pytest.mark.skipif(not os.environ.get("TDAGENT_EXPLAIN_CORPUS"), reason="set TDAGENT_EXPLAIN_CORPUS to a real extract")
 def test_real_corpus_has_no_unparsed_phrases():
-    cov = check(load_extract(os.environ["TDAGENT_EXPLAIN_CORPUS"]))
-    assert cov.plans > 0
-    assert cov.ok, "\n".join(cov.problems[:30])
+    for path in os.environ["TDAGENT_EXPLAIN_CORPUS"].split(os.pathsep):
+        cov = check(load_extract(path))
+        assert cov.plans > 0, path
+        assert cov.ok, path + "\n" + "\n".join(cov.problems[:30])
+
+
+# ------------------------------------------------------------------ HELPSTATS / DML / QueryGrid
+from tdagent.schema import SchemaStore  # noqa: E402
+from tdagent.tuning import recommend  # noqa: E402
+
+HELPSTATS = (ROOT / "tests/fixtures/explain_td20_helpstats.txt").read_text()
+QUERYGRID = (ROOT / "tests/fixtures/explain_td20_querygrid.txt").read_text()
+DML = (ROOT / "tests/fixtures/explain_td20_dml.txt").read_text()
+
+
+def test_helpstats_blocks_wrapped_statements_and_confidence():
+    p = parse_explain(HELPSTATS)
+    d = {h.statement: h for h in p.helpstats_detail}
+    wide = "COLLECT STATISTICS COLUMN (CUST_ID, PROD_ID, SALE_DT, QTY, CHANNEL_CD, SALE_AMT) ON SALES_DB.SALES_TXN;"
+    assert wide in d and len(d[wide].columns) == 6 and d[wide].confidence == "High"
+    assert d["COLLECT STATISTICS COLUMN (CHANNEL_CD, PROD_ID) ON SALES_DB.SALES_TXN;"].section == "final"
+    summary = d["COLLECT SUMMARY STATISTICS ON SALES_DB.PRODUCT;"]
+    assert summary.section == "other" and summary.summary_stats and summary.table == "SALES_DB.PRODUCT"
+    assert d["COLLECT STATISTICS COLUMN (PROD_ID) ON SALES_DB.SALES_TXN;"].confidence == "Medium"
+    assert p.helpstats[0] == "COLLECT STATISTICS COLUMN (QTY) ON SALES_DB.SALES_TXN;"  # High/final/1 column first
+    assert len(p.helpstats) == 7 and "END RECOMMENDED" not in p.steps[-1].text
+
+
+def test_helpstats_triage():
+    p = parse_explain(HELPSTATS)
+    r = recommend.build("SELECT 1", p, [], SchemaStore())
+    assert r.stats == ["COLLECT STATISTICS COLUMN (QTY) ON SALES_DB.SALES_TXN;",
+                       "COLLECT STATISTICS COLUMN (CHANNEL_CD, PROD_ID) ON SALES_DB.SALES_TXN;",
+                       "COLLECT SUMMARY STATISTICS ON SALES_DB.PRODUCT;"]
+    reasons = {s: r.stats_reasons[s] for s in r.stats_optional}
+    assert any("6개 컬럼 조합" in v for v in reasons.values())
+    assert any("시스템 딕셔너리" in v for v in reasons.values())
+    assert reasons["COLLECT STATISTICS COLUMN (CATEGORY_CD) ON SALES_DB.PRODUCT;"].endswith("다른 계획 후보")
+    assert "(Medium)" not in " ".join(r.stats)
+
+
+def test_merge_target_and_small_product_join_with_large_time_share():
+    p = parse_explain(HELPSTATS)
+    s5 = p.step("5")
+    assert s5.op == "MERGE" and s5.target == "SALES_DB.SALES_SUMMARY" and s5.est_rows == 208
+    f = {x.code: x for x in from_explain(p, TuningConfig())}
+    pj = f["PRODUCT_JOIN"]
+    assert pj.severity == "info" and "6 × ?" in pj.detail and "주로 스캔 비용" in pj.detail
+    assert "High 5" in f["STATS_RECOMMENDED"].detail and "다른 계획용 2" in f["STATS_RECOMMENDED"].detail
+
+
+def test_dml_steps():
+    p = parse_explain(DML)
+    d = p.step("3")
+    assert d.op == "DELETE" and d.scans[0].access == "full table deletion" and not d.scans[0].full_scan
+    i = p.step("4")
+    assert i.op == "INSERT" and i.amps == "" and i.target == "SALES_DB.LOAD_LOG" and i.est_time == 0.02
+    assert p.total_time == pytest.approx(0.99) and p.total_time_source == "steps"
+
+
+def test_querygrid_remote_plan():
+    p = parse_explain(QUERYGRID)
+    s = p.step("1")
+    assert s.table_operator == "TD_SYSFNLIB.QGINITIATORIMPORT" and s.scans == []  # remote FROM is not a local scan
+    r = s.remote
+    assert r.sql.startswith("SELECT BASE_YYYYMM") and r.objects == ["REMOTE_DW.CUST_MONTH"]
+    assert r.full_scan and not r.filtered and r.cardinality == 581
+    assert s.est_rows == 60_000 and p.total_time == 0.01 and "QueryGrid" in p.notes[0]
+    f = {x.code: x for x in from_explain(p, TuningConfig())}
+    assert f["REMOTE_FULL_TRANSFER"].severity == "warning" and f["REMOTE_FULL_TRANSFER"].tables == ["REMOTE_DW.CUST_MONTH"]
+    assert "60,000" in f["REMOTE_QUERY"].detail and "581" in f["REMOTE_QUERY"].detail
+    assert "STATS_NO_CONFIDENCE" not in f  # remote estimates are not a local statistics problem
+
+
+def test_querygrid_with_pushed_predicate_is_not_full_transfer():
+    filtered = QUERYGRID.replace("REMOTE_DW.CUST_MONTH\n     /*0000_EXEC*/",
+                                 "REMOTE_DW.CUST_MONTH WHERE BASE_YYYYMM = '202601'\n     /*0000_EXEC*/")
+    p = parse_explain(filtered)
+    assert p.step("1").remote.filtered
+    assert "REMOTE_FULL_TRANSFER" not in {x.code for x in from_explain(p, TuningConfig())}

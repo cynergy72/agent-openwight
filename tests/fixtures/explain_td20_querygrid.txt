@@ -1,0 +1,28 @@
+  1) First, we do an all-AMPs RETRIEVE step executing table operator
+     TD_SYSFNLIB.QGINITIATORIMPORT in TD_MAP1 with a condition of (
+     "(1=1)").
+     < BEGIN EXPLAIN FOR REMOTE QUERY -->
+     Query steps:
+     SELECT BASE_YYYYMM ,CUST_ID ,TRAN_COUNT ,PRINCIPAL_AMT FROM
+     REMOTE_DW.CUST_MONTH
+     /*0000_EXEC*/
+     Remote Queries:
+     1. EXPLAIN PLAN SET STATEMENT_ID = 'abc' FOR SELECT BASE_YYYYMM
+     ,CUST_ID ,TRAN_COUNT ,PRINCIPAL_AMT FROM REMOTE_DW.CUST_MONTH
+     2. [Statement_ID=abc, Plan_ID=102, Operation=SELECT STATEMENT,
+     Options=, Object_Owner=, Object_Name=, ID=0, Cost=3,
+     Cardinality=581, Bytes=23821, Access_Predicates=,
+     Filter_Predicates=, Statement_ID=abc, Plan_ID=102,
+     Operation=TABLE ACCESS, Options=FULL, Object_Node=,
+     Object_Owner=REMOTE_DW, Object_Name=CUST_MONTH, ID=1, Parent_ID=0,
+     Cost=3, Cardinality=581, Bytes=23821, Access_Predicates=,
+     Filter_Predicates=, Projection="BASE_YYYYMM"[VARCHAR2,8],
+     "CUST_ID"[NUMBER,22]]
+     <-- END EXPLAIN FOR REMOTE QUERY >
+     The size of Spool 2 is estimated with no confidence to be 60,000
+     rows (9,480,000 bytes).  The estimated time for this step is 0.01
+     seconds.
+  2) Finally, we send out an END TRANSACTION step to all AMPs involved
+     in processing the request.
+  -> The contents of Spool 2 are sent back to the user as the result of
+     statement 1.  The total estimated time is 0.01 seconds.

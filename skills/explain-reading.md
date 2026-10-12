@@ -54,6 +54,13 @@ EXPLAIN 은 실행하지 않고 실행 계획만 보여준다. 예상 행 수·�
 | `This step is used to retrieve the TOP n rows` | TOP n 처리 단계 | |
 | `-> As the result of statement 1.` (총 예상 시간 없음) | 일부 계획은 총 시간을 표시하지 않음 | 단계별 시간 합으로 비교 |
 | `:?` (인덱스 조건 안) | 파라미터 마커 | 값에 따라 계획이 달라질 수 있음 |
+| `We do an all-AMPs MERGE step into T from Spool n` | INSERT-SELECT 적재 단계 | 대상 PI·빈 테이블 여부 확인 (TP-ETL-01) |
+| `We do an INSERT step into T` | 단건 INSERT | |
+| `by way of full table deletion` | 빠른 전체 삭제 (DELETE ALL) | 양호 (TP-ETL-04) |
+| `We spoil the parser's dictionary cache` / `We flush the DISKSPACE caches` | DDL/DML 후 캐시 처리 | 정보 |
+| `executing table operator TD_SYSFNLIB.QGINITIATORIMPORT` | QueryGrid 원격 조회 | 원격 계획 블록 확인 (querygrid 스킬) |
+| `< BEGIN EXPLAIN FOR REMOTE QUERY --> ... <-- END ... >` | 원격 시스템의 실행 계획 | 원격 SQL·전체 스캔·추정 행 수 확인 |
+| `BEGIN RECOMMENDED STATS FOR FINAL PLAN / OTHER PLANS ->` | HELPSTATS 통계 권고 (신뢰도 표시) | 선별 적용 (TP-STAT-06) |
 
 ## TP-EXP-01 병목 단계
 - 신호: 한 단계의 예상 시간이 총 예상 시간의 절반 이상

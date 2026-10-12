@@ -206,10 +206,11 @@ class TuningSession:
         recs = recommend.build(best.sql, best.parsed or base.parsed, best.findings + [
             f for f in base.findings if f.source in ("dbql", "table")], self.store)
         if base.parsed is not None and best.parsed is not None and base is not best:
-            for h in base.parsed.helpstats:
-                if h not in recs.stats:
-                    recs.stats.append(h)
-                    recs.stats_reasons[h] = "옵티마이저 HELPSTATS 권고 (원본)"
+            extra = recommend.build(sql, base.parsed, [], self.store)
+            for s in extra.stats + extra.stats_optional:
+                if s.upper() not in (x.upper() for x in recs.stats + recs.stats_optional):
+                    (recs.stats if s in extra.stats else recs.stats_optional).append(s)
+                    recs.stats_reasons[s] = extra.stats_reasons.get(s, "") + " (원본 계획)"
         report = TuningReport(goal=goal, original=base, best=best, best_attempt=best_attempt, attempts=attempts,
                               criteria=criteria, goal_met=goal_met, stop_reason=stop_reason, verified=verified,
                               recommendations=recs, report_md="", dbql=dbql)

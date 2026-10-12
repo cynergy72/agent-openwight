@@ -7,14 +7,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from ..schema import SchemaStore
-from .explain import ParsedExplain
+from .explain import HelpStat, ParsedExplain
 from .findings import Finding
 from .sqlcheck import predicate_columns
 
 
 @dataclass
 class Recommendations:
-    stats: list[str] = field(default_factory=list)        # COLLECT STATISTICS statements
+    stats: list[str] = field(default_factory=list)        # COLLECT STATISTICS statements to apply first
+    stats_optional: list[str] = field(default_factory=list)  # lower value / higher cost: review before collecting
     stats_reasons: dict[str, str] = field(default_factory=dict)
     partition_candidates: list[tuple[str, str]] = field(default_factory=list)  # (table, date column)
     pi_candidates: list[tuple[str, str]] = field(default_factory=list)         # (table, columns)
@@ -24,6 +25,9 @@ class Recommendations:
         if self.stats:
             lines.append("통계 수집 후보:")
             lines += [f"- {s}  -- {self.stats_reasons.get(s, '')}" for s in self.stats]
+        if self.stats_optional:
+            lines.append("통계 선택 검토 (우선순위 낮음 / 수집 비용 큼 / DBA 영역):")
+            lines += [f"- {s}  -- {self.stats_reasons.get(s, '')}" for s in self.stats_optional]
         if self.partition_candidates:
             lines.append("파티션 추가 후보 (테이블, 범위 조건 날짜 컬럼):")
             lines += [f"- {t} / {c}" for t, c in self.partition_candidates]
@@ -33,6 +37,24 @@ class Recommendations:
         return "\n".join(lines) or "(없음)"
 
 
+WIDE_STATS = 5  # multi-column statistics with this many columns cost a lot for little gain in most plans
+
+
+def _triage(h: HelpStat) -> tuple[bool, str]:
+    """(apply first?, reason) for one HELPSTATS recommendation."""
+    where = "최종 계획" if h.section != "other" else "다른 계획 후보"
+    reason = f"HELPSTATS · {h.confidence or '?'} · {where}"
+    if h.summary_stats:
+        return True, reason + " · SUMMARY 통계 (테이블 행 수, 수집 비용 작음)"
+    if h.table.upper().startswith("DBC."):
+        return False, reason + " · 시스템 딕셔너리 (DBA 작업)"
+    if len(h.columns) >= WIDE_STATS:
+        return False, reason + f" · {len(h.columns)}개 컬럼 조합 (수집 비용 큼, 효과 제한적)"
+    if h.section == "other" or h.confidence.lower() in ("medium", "low"):
+        return False, reason
+    return True, reason + (f" · {len(h.columns)}개 컬럼 조합" if len(h.columns) > 1 else "")
+
+
 def _stat(table: str, cols: str) -> str:
     return f"COLLECT STATISTICS COLUMN ({cols}) ON {table};"
 
@@ -40,15 +62,17 @@ def _stat(table: str, cols: str) -> str:
 def build(sql: str, parsed: ParsedExplain | None, findings: list[Finding], store: SchemaStore) -> Recommendations:
     rec = Recommendations()
 
-    def add_stat(stmt: str, why: str):
+    def add_stat(stmt: str, why: str, optional: bool = False):
         key = stmt.upper()
-        if all(s.upper() != key for s in rec.stats):
-            rec.stats.append(stmt)
+        if all(s.upper() != key for s in rec.stats + rec.stats_optional):
+            (rec.stats_optional if optional else rec.stats).append(stmt)
             rec.stats_reasons[stmt] = why
 
     if parsed is not None:
-        for h in parsed.helpstats:
-            add_stat(h if h.endswith(";") else h + ";", "옵티마이저 HELPSTATS 권고")
+        details = parsed.helpstats_detail or [HelpStat(statement=h) for h in parsed.helpstats]
+        for h in details:
+            first, why = _triage(h)
+            add_stat(h.statement if h.statement.endswith(";") else h.statement + ";", why, optional=not first)
 
     weak_tables = {t.lower() for f in findings if f.code in ("STATS_NO_CONFIDENCE", "STATS_LOW_CONFIDENCE",
                                                              "DUPLICATE_LARGE", "PRODUCT_JOIN") for t in f.tables}
