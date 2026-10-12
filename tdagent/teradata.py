@@ -44,8 +44,9 @@ def _format_type(type_code, length, total, frac) -> str:
 
 
 class TeradataClient:
-    def __init__(self, cfg: TeradataConfig):
+    def __init__(self, cfg: TeradataConfig, helpstats: bool = False):
         self.cfg = cfg
+        self.helpstats = helpstats  # DIAGNOSTIC HELPSTATS ON FOR SESSION -> EXPLAIN lists recommended stats
         self._con = None
 
     def _connect(self):
@@ -61,6 +62,12 @@ class TeradataClient:
                 )
             except Exception as e:
                 raise TeradataError(f"접속 실패: {_clean_error(e)}") from e
+            if self.helpstats:
+                try:
+                    with self._con.cursor() as cur:
+                        cur.execute("DIAGNOSTIC HELPSTATS ON FOR SESSION")
+                except Exception:
+                    pass  # not fatal: EXPLAIN just won't list recommended stats
         return self._con
 
     @property
@@ -88,6 +95,20 @@ class TeradataClient:
         _, rows = self._fetch("SELECT InfoData FROM DBC.DBCInfoV WHERE InfoKey = 'VERSION'")
         return str(rows[0][0]).strip() if rows else "?"
 
+    def query(self, sql: str, params=None) -> tuple[list[str], list[tuple]]:
+        """Run one of this tool's own fixed dictionary/DBQL queries (not user SQL)."""
+        return self._fetch(sql, params)
+
+    def table_skew(self, full_name: str) -> float | None:
+        """AMP-level space skew % of a table: (1 - AVG/MAX CurrentPerm) * 100."""
+        db, _, name = full_name.rpartition(".")
+        if not db:
+            return None
+        _, rows = self._fetch(
+            "SELECT CAST((1 - AVG(CurrentPerm) / NULLIFZERO(MAX(CurrentPerm))) * 100 AS DECIMAL(6,2)) "
+            "FROM DBC.TableSizeV WHERE DatabaseName = ? AND TableName = ?", [db, name])
+        return float(rows[0][0]) if rows and rows[0][0] is not None else None
+
     # ----------------------------------------------------------- agent ops
     def explain(self, sql: str) -> str:
         """Run EXPLAIN. Fails with the real Teradata error if the SQL is invalid
@@ -103,6 +124,16 @@ class TeradataClient:
         if not ok:
             raise TeradataError(reason)
         return self._fetch(sql.strip().rstrip(";"), max_rows=self.cfg.max_rows)
+
+    def count_query(self, sql: str) -> int:
+        """Run a read-only COUNT query built by the tuner (result equivalence check)."""
+        if not self.cfg.allow_execute:
+            raise TeradataError("결과 비교에는 쿼리 실행 허용(teradata.allow_execute)이 필요합니다.")
+        ok, reason = is_read_only(sql)
+        if not ok:
+            raise TeradataError(reason)
+        _, rows = self._fetch(sql)
+        return int(rows[0][0]) if rows else 0
 
     def describe(self, full_name: str) -> Table | None:
         db, _, name = full_name.rpartition(".")

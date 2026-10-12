@@ -44,10 +44,39 @@ class TeradataConfig:
 
 
 @dataclass
+class TuningConfig:
+    skills_dir: str = "skills"
+    max_iterations: int = 5       # rewrite attempts per tuning run
+    patience: int = 2             # stop after this many attempts without improvement
+    skill_chars: int = 7000       # tuning-point knowledge budget per prompt
+    helpstats: bool = True        # DIAGNOSTIC HELPSTATS ON FOR SESSION before EXPLAIN
+    # thresholds for EXPLAIN findings (estimated rows)
+    dup_rows: int = 1_000_000
+    redistribute_rows: int = 10_000_000
+    scan_rows: int = 1_000_000
+    spool_rows: int = 100_000_000
+    # thresholds for DBQL / table findings
+    cpu_skew_warn: float = 2.0
+    cpu_skew_crit: float = 5.0
+    pji_warn: float = 3.0
+    uii_warn: float = 3.0
+    table_skew_warn: float = 20.0
+    table_skew_crit: float = 50.0
+
+
+@dataclass
+class DBQLConfig:
+    log_table: str = "DBC.DBQLogTbl"   # PDCR sites: e.g. PDCRINFO.DBQLogTbl_Hst
+    sql_table: str = "DBC.DBQLSqlTbl"  # e.g. PDCRINFO.DBQLSqlTbl_Hst
+
+
+@dataclass
 class Config:
     llm: LLMConfig = field(default_factory=LLMConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     teradata: TeradataConfig = field(default_factory=TeradataConfig)
+    tuning: TuningConfig = field(default_factory=TuningConfig)
+    dbql: DBQLConfig = field(default_factory=DBQLConfig)
     base_dir: Path = field(default_factory=Path.cwd)
     source: Path = field(default_factory=lambda: Path("config.toml"))  # file to save settings to
 
@@ -83,6 +112,8 @@ def load_config(path: str | Path | None = None) -> Config:
         llm=_fill(LLMConfig, data.get("llm", {})),
         agent=_fill(AgentConfig, data.get("agent", {})),
         teradata=_fill(TeradataConfig, data.get("teradata", {})),
+        tuning=_fill(TuningConfig, data.get("tuning", {})),
+        dbql=_fill(DBQLConfig, data.get("dbql", {})),
         base_dir=path.resolve().parent if path.exists() else Path.cwd(),
         source=path.resolve(),
     )

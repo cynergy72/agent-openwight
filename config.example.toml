@@ -32,3 +32,22 @@ logmech = "TD2"             # 또는 "LDAP"
 databases = ["SALES_DB", "CUST_DB"]  # sync-schema 대상
 allow_execute = false       # true 면 에이전트가 SELECT 를 직접 실행 (읽기 전용만)
 max_rows = 50
+
+[tuning]
+max_iterations = 5          # 목표 달성까지 재작성 최대 시도 횟수
+patience = 2                # 연속 개선 없음 N회면 중단
+helpstats = true            # EXPLAIN 전에 DIAGNOSTIC HELPSTATS ON FOR SESSION (통계 권고 수집)
+# 탐지 임계값 (EXPLAIN 예상 행 수)
+dup_rows = 1000000          # 이 이상 복제되면 DUPLICATE_LARGE
+redistribute_rows = 10000000
+scan_rows = 1000000         # 파티션 없는 전체 스캔 결과가 이 이상이면 FULL_SCAN_LARGE
+spool_rows = 100000000
+# DBQL / 테이블 지표 임계값
+cpu_skew_warn = 2.0
+cpu_skew_crit = 5.0
+table_skew_warn = 20.0      # %
+table_skew_crit = 50.0
+
+[dbql]
+log_table = "DBC.DBQLogTbl" # PDCR 이력 테이블을 쓰면 예: "PDCRINFO.DBQLogTbl_Hst"
+sql_table = "DBC.DBQLSqlTbl"

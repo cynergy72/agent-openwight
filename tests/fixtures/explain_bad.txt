@@ -1,0 +1,35 @@
+Explanation
+---------------------------------------------------------------------------
+  1) First, we lock SALES_DB.CUSTOMER in TD_MAP1 for read on a reserved
+     RowHash to prevent global deadlock.
+  2) Next, we lock SALES_DB.SALES_TXN in TD_MAP1 for read on a reserved
+     RowHash in all partitions to prevent global deadlock.
+  3) We lock SALES_DB.CUSTOMER in TD_MAP1 for read, and we lock
+     SALES_DB.SALES_TXN in TD_MAP1 for read.
+  4) We do an all-AMPs RETRIEVE step in TD_MAP1 from SALES_DB.CUSTOMER by
+     way of an all-rows scan with no residual conditions into Spool 2
+     (all_amps), which is duplicated on all AMPs in TD_Map1.  The size
+     of Spool 2 is estimated with no confidence to be 24,000,000 rows (
+     720,000,000 bytes).  The estimated time for this step is 3.20
+     seconds.
+  5) We do an all-AMPs JOIN step in TD_Map1 from Spool 2 (Last Use) by
+     way of an all-rows scan, which is joined to SALES_DB.SALES_TXN by
+     way of an all-rows scan with a condition of ("(CAST((SALES_DB.SALES_TXN.SALE_DT) AS CHAR(7)))= '2024-01'").
+     Spool 2 and SALES_DB.SALES_TXN are joined using a product join,
+     with a join condition of ("(SALES_DB.SALES_TXN.CUST_ID = CUST_ID) OR (SALES_DB.SALES_TXN.PROD_ID = CUST_ID)").
+     The result goes into Spool 1 (group_amps), which is built locally on
+     the AMPs.  The size of Spool 1 is estimated with no confidence to
+     be 98,000,000 rows (5,880,000,000 bytes).  The estimated time for
+     this step is 1 hour and 12 minutes.
+  6) Finally, we send out an END TRANSACTION step to all AMPs involved
+     in processing the request.
+  -> The contents of Spool 1 are sent back to the user as the result of
+     statement 1.  The total estimated time is 1 hour and 12 minutes.
+     BEGIN RECOMMENDED STATS FOR FINAL PLAN->
+     -- "COLLECT STATISTICS COLUMN (CUST_ID) ON SALES_DB.CUSTOMER"
+     (High Confidence)
+     -- "COLLECT STATISTICS COLUMN (SALE_DT) ON SALES_DB.SALES_TXN"
+     (High Confidence)
+     -- "COLLECT STATISTICS COLUMN (PARTITION) ON SALES_DB.SALES_TXN"
+     (High Confidence)
+     <- END RECOMMENDED STATS FOR FINAL PLAN

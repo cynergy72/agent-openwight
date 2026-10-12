@@ -1,0 +1,37 @@
+  1) First, we lock SALES_DB.CUSTOMER in TD_MAP1 for read on a reserved
+     RowHash to prevent global deadlock.
+  2) Next, we lock SALES_DB.SALES_TXN in TD_MAP1 for read on a reserved
+     RowHash in all partitions to prevent global deadlock.
+  3) We execute the following steps in parallel.
+       1) We do an all-AMPs RETRIEVE step in TD_MAP1 from 1 partition of
+          SALES_DB.SALES_TXN with a condition of (
+          "(SALES_DB.SALES_TXN.SALE_DT >= DATE '2024-01-01') AND
+          (SALES_DB.SALES_TXN.SALE_DT < DATE '2024-02-01')") into Spool 3
+          (all_amps), which is built locally on the AMPs.  The size of
+          Spool 3 is estimated with high confidence to be 2,100,000 rows
+          (52,500,000 bytes).  The estimated time for this step is 0.42
+          seconds.
+       2) We do an all-AMPs RETRIEVE step in TD_MAP1 from
+          SALES_DB.CUSTOMER by way of an all-rows scan with no residual
+          conditions into Spool 4 (all_amps), which is redistributed by
+          the hash code of (SALES_DB.CUSTOMER.CUST_ID) to all AMPs in
+          TD_Map1.  The size of Spool 4 is estimated with high confidence
+          to be 1,200,000 rows (30,000,000 bytes).  The estimated time for
+          this step is 0.15 seconds.
+  4) We do an all-AMPs JOIN step in TD_Map1 from Spool 3 (Last Use) by
+     way of a RowHash match scan, which is joined to Spool 4 (Last Use)
+     by way of a RowHash match scan.  Spool 3 and Spool 4 are joined
+     using a merge join, with a join condition of ("CUST_ID = CUST_ID").
+     The result goes into Spool 5 (all_amps), which is built locally on
+     the AMPs.  The size of Spool 5 is estimated with low confidence to
+     be 2,100,000 rows (63,000,000 bytes).  The estimated time for this
+     step is 0.31 seconds.
+  5) We do an all-AMPs SUM step in TD_Map1 to aggregate from Spool 5 (Last
+     Use) by way of an all-rows scan.  Aggregate Intermediate Results
+     are computed globally, then placed in Spool 6.  The size of Spool 6
+     is estimated with low confidence to be 4 rows (120 bytes).  The
+     estimated time for this step is 0.08 seconds.
+  6) Finally, we send out an END TRANSACTION step to all AMPs involved
+     in processing the request.
+  -> The contents of Spool 1 are sent back to the user as the result of
+     statement 1.  The total estimated time is 0.81 seconds.
