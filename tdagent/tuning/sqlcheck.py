@@ -419,5 +419,7 @@ def result_check_sql(original: str, rewritten: str) -> tuple[str, str] | None:
                 or t.find(exp.TableSample):
             return None
     qa, qb = original.strip().rstrip(";"), rewritten.strip().rstrip(";")
+    if "?" in strip_comments_and_strings(qa + qb):
+        return None  # parameter markers: the real values are unknown, comparing with dummies proves nothing
     return (f"SELECT COUNT(*) FROM ({qa} EXCEPT ALL {qb}) AS d",
             f"SELECT COUNT(*) FROM ({qb} EXCEPT ALL {qa}) AS d")

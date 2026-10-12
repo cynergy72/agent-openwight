@@ -2,7 +2,7 @@
 name: skew
 description: 스큐 진단과 해결 - 테이블 PI 스큐, 조인/집계 키 쏠림, NULL·기본값, 스풀 부족(2646), DBQL CPU 스큐
 category: 분산
-findings: [CPU_SKEW, IO_SKEW, TABLE_SKEW]
+findings: [CPU_SKEW, IO_SKEW, TABLE_SKEW, SKEWED_REDISTRIBUTION]
 ---
 # 스큐 (Skew)
 
@@ -40,6 +40,15 @@ SELECT TOP 20 KEY_COL, COUNT(*) FROM DB.TBL GROUP BY 1 ORDER BY 2 DESC;
 ## TP-SKEW-04 집계·윈도우 키 쏠림
 - 낮은 카디널리티 GROUP BY / PARTITION BY 는 몇 개 AMP 에 몰린다. PARTITION BY 없는 윈도우 함수는 **한 AMP** 에서
   처리된다 (aggregation-olap 스킬 TP-AGG-03).
+
+## TP-SKEW-06 상수·저카디널리티 키로 재분배 (few AMPs)
+- 신호: EXPLAIN `redistributed by the hash code of ('상수값') to few AMPs`, `... of (9108) to few AMPs`
+  처럼 상수나 고유값이 거의 없는 식으로 재분배 → 모든 행이 한두 AMP 로 모인다
+- 원인: 조인/집계 키가 상수로 고정됨 (예: `WHERE src = 'X'` 로 거른 뒤 그 컬럼으로 조인·GROUP BY),
+  `GROUP BY` 키가 리터럴, `PARTITION BY` 가 사실상 한 값
+- 조치(A): 상수 조건이 걸린 컬럼은 조인/그룹 키에서 빼고 고유값이 많은 키로 조인하거나, 상수 조건을 양쪽 테이블에
+  모두 걸어 옵티마이저가 키에서 제외하게 한다. 행이 적으면 영향이 작으므로 행 수를 먼저 본다.
+- 검증: 해당 단계가 `to all AMPs` 또는 `built locally` 로 바뀜
 
 ## TP-SKEW-05 volatile table PI 를 잘못 잡음
 - `CREATE VOLATILE TABLE ... AS (...) WITH DATA` 에서 PI 를 생략하면 첫 컬럼이 PI 가 되어 스큐가 생기기 쉽다.

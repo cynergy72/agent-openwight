@@ -70,7 +70,7 @@ DBQL 고부하 쿼리 / 붙여넣은 SQL
 
 | 출처 | 탐지 (→ 튜닝 포인트) |
 |---|---|
-| EXPLAIN | product join (TP-JOIN-01/05), 대용량 복제 (TP-JOIN-12), 대용량 재분배 (TP-JOIN-11), 조인 형변환 (TP-JOIN-13), 파티션 테이블 전체 스캔 (TP-PART-01/02), 파티션 없는 대용량 전체 스캔 (TP-PART-05), no/low confidence (TP-STAT-01/02), HELPSTATS 권고 (TP-STAT-03), 대용량 스풀 (TP-RES-01), 병목 단계 (TP-EXP-01) |
+| EXPLAIN | product join (TP-JOIN-01/05, 입력 스풀 행 수로 크기 판단 - 몇 행짜리는 info), 소수 AMP 재분배 (TP-SKEW-06), 넓은 행 스풀 (bytes 기준), 대용량 복제 (TP-JOIN-12), 대용량 재분배 (TP-JOIN-11), 조인 형변환 (TP-JOIN-13), 파티션 테이블 전체 스캔 (TP-PART-01/02), 파티션 없는 대용량 전체 스캔 (TP-PART-05), no/low confidence (TP-STAT-01/02), HELPSTATS 권고 (TP-STAT-03), 대용량 스풀 (TP-RES-01), 병목 단계 (TP-EXP-01) |
 | SQL 패턴 | 콤마 조인·조건 누락, OR 조인, 비동등 조인, 함수 조인, 컬럼 함수 조건(파티션 컬럼이면 critical), 문자 컬럼 vs 숫자 상수, 선행 % LIKE, 다른 컬럼 OR, 대형 IN, OUTER JOIN 의 WHERE 조건, 안 쓰는 OUTER JOIN, NOT IN 서브쿼리, 상관/스칼라 서브쿼리, **중간 결과의 안 쓰는 컬럼**, SELECT *, 반복 스캔, UNION, DISTINCT, PARTITION BY 없는 윈도우, UPDATE-조인, 전체 DELETE |
 | DBQL | CPU/IO 스큐, PJI ≥ 3 (product join 의심), UII ≥ 3 (불필요 IO 의심) |
 | 테이블 | AMP 간 용량 스큐 (DBC.TableSizeV) → PI 검토 |
@@ -202,6 +202,7 @@ tdagent tune q.sql --analyze-only              # 진단만
 tdagent tune q.sql --explain explain.txt       # DB 미연결: 붙여넣은 EXPLAIN 으로 진단 + 검증 안 된 재작성 제안 1개
 tdagent tune q.sql --result-check              # 채택 전 원본/재작성 결과를 EXCEPT ALL 로 비교 (실행 허용 필요)
 tdagent skills 파티션                           # 튜닝 포인트 카탈로그 검색
+tdagent explain-check top50.txt --plans        # 실제 EXPLAIN 추출본으로 파서·탐지 점검 (놓친 문구가 있으면 exit 1)
 tdagent chat                                   # 대화형 (수정 요청을 이어서 할 수 있음)
 tdagent ask "지난달 채널별 순매출"
 tdagent ask "고객명 컬럼 추가하고 VIP만" -f q.sql  # 기존 쿼리 수정
@@ -233,6 +234,18 @@ tdagent -v chat                                # 도구 결과까지 보기
 
 - 통계 수집·파티션·PI 변경은 **권고 스크립트로만** 제공합니다. 에이전트가 DDL 을 실행하지 않습니다.
 - EXPLAIN 은 실행 계획만 만들고 쿼리를 실행하지 않습니다. INSERT-SELECT 같은 DML 도 EXPLAIN 으로만 분석합니다.
+
+### EXPLAIN 파서 검증
+
+Teradata 20.0 실제 EXPLAIN 46건(성공 34, 권한/객체 오류 12)으로 보정했습니다. 뷰 별칭(`DB.A in view V`),
+스풀 번호 없는 크기 문구, 키 없는/상수 키 재분배(`to few AMPs`), OUTER JOIN 방식, `all partitions`/초대형 파티션 수,
+총 예상 시간이 없는 계획(단계 합으로 대체), IPE 머리말, 조건·재분배 키 안의 `TRIM(BOTH FROM ...)` 를 처리합니다.
+스풀 번호를 따라가며 단계별 입력 행 수와 원천 테이블(lineage)을 계산해 product join 크기와 통계 권고 대상에 씁니다.
+
+새 환경의 EXPLAIN 을 추출하면 `tdagent explain-check` 로 놓치는 문구가 있는지 바로 확인할 수 있고,
+`TDAGENT_EXPLAIN_CORPUS=<파일> pytest` 로 회귀 테스트에 넣을 수 있습니다 (사내 정보가 담긴 원본은 저장소에 넣지 않음).
+
+애플리케이션 SQL 의 `?` 파라미터 마커는 더미 값 `'1'` 로 바인딩해 EXPLAIN 하고, 리포트에 그 사실을 표시합니다.
 
 ### 한계
 - 예상 시간은 옵티마이저 추정치입니다. 효과는 반영 후 DBQL 의 CPU/IO 로 확인하세요.

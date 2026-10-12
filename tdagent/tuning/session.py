@@ -20,7 +20,7 @@ from ..llm import ChatModel
 from ..schema import SchemaStore
 from ..skills import SkillLibrary
 from ..sql_lint import catalog_issues, lint_sql, normalize_sql
-from ..teradata import TeradataClient, TeradataError
+from ..teradata import TeradataClient, TeradataError, parameter_markers
 from . import recommend
 from .explain import ParsedExplain, parse_explain, plan_metrics
 from .findings import (SEVERITY_ICON, Finding, count_by_severity, from_dbql, from_explain, from_table_skew,
@@ -42,6 +42,7 @@ class Measurement:
     metrics: dict = field(default_factory=dict)
     findings: list[Finding] = field(default_factory=list)
     dialect_errors: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
 
     @property
     def counts(self) -> dict[str, int]:
@@ -112,8 +113,14 @@ class TuningSession:
                 m.explain_text = self.td.explain(sql)
             except TeradataError as e:
                 m.explain_error = str(e)
+        n_params = parameter_markers(sql)
+        if n_params and self.td is not None and not explain_text:
+            m.notes.append(f"파라미터 마커 {n_params}개를 더미 값 '1' 로 바인딩해 EXPLAIN (실제 값과 계획이 다를 수 있음)")
         if m.explain_text:
             m.parsed = parse_explain(m.explain_text)
+            m.notes += m.parsed.notes
+            if m.parsed.total_time_source == "steps":
+                m.notes.append("EXPLAIN 에 총 예상 시간이 없어 단계별 예상 시간의 합으로 추정")
             m.metrics = plan_metrics(m.parsed, partitioned)
             findings += from_explain(m.parsed, self.cfg, partitioned)
         if dbql:
@@ -366,6 +373,7 @@ class TuningSession:
         parts = [f"## 목표\n{r.goal.describe()}",
                  "## 목표 판정\n" + "\n".join(f"- {'✅' if c.met else '❌'} {c.name}: {c.detail}" for c in r.criteria),
                  f"종료 사유: {r.stop_reason}. EXPLAIN 검증: {'예' if r.verified else '아니오'}",
+                 *(["측정 메모: " + "; ".join(r.original.notes)] if r.original.notes else []),
                  "## 지표 (원본 → 최종)\n" + metrics_table(r.original.metrics, final_metrics(r))]
         if r.dbql:
             parts.append("## DBQL 지표\n" + ", ".join(f"{k}={v}" for k, v in r.dbql.items() if k != "SqlPreview"))

@@ -286,6 +286,10 @@ def _render_report(r: TuningReport) -> None:
         st.warning(f"목표 미달성 · {r.stop_reason}")
     if not r.verified:
         st.info("Teradata 에 연결되지 않아 재작성 결과를 EXPLAIN 으로 검증하지 못했습니다.")
+    for note in r.original.notes:
+        st.caption(f"ℹ️ {note}")
+    if r.original.explain_error:
+        st.error(f"원본 EXPLAIN 실패: {r.original.explain_error}")
     _metrics(r)
     if r.criteria and r.stop_reason != "진단만 수행":
         st.markdown(" · ".join(f"{'✅' if c.met else '❌'} {c.name} ({c.detail})" for c in r.criteria))

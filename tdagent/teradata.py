@@ -7,9 +7,11 @@ query without running it), metadata lookups, and - only when
 
 from __future__ import annotations
 
+import re
+
 from .config import TeradataConfig
 from .schema import Column, SchemaStore, Table
-from .sql_lint import is_read_only
+from .sql_lint import is_read_only, strip_comments_and_strings
 
 TYPE_NAMES = {
     "I": "INTEGER", "I1": "BYTEINT", "I2": "SMALLINT", "I8": "BIGINT",
@@ -26,11 +28,30 @@ class TeradataError(Exception):
     pass
 
 
+ERROR_HINTS = {
+    "3523": "권한 없음 - EXPLAIN 도 대상 테이블 SELECT 권한이 필요합니다. 접속 사용자 권한을 확인하세요.",
+    "3807": "객체 없음 - volatile/global temporary table 이면 앞 단계의 CREATE 문이 같은 세션에서 먼저 실행돼야 합니다.",
+    "3706": "문법 오류 - Teradata 방언 확인 (LIMIT, :: 등).",
+    "5628": "컬럼 없음 - 컬럼명을 확인하세요.",
+}
+
+
 def _clean_error(e: Exception) -> str:
-    """teradatasql errors carry a long Go stack trace; keep the first line."""
+    """teradatasql errors carry a version/session prefix and a long Go stack trace:
+    keep "[Error NNNN] message" and add a hint for common codes."""
     text = str(e).strip()
     first = text.splitlines()[0] if text else repr(e)
-    return first[:500]
+    m = re.search(r"\[Error (\d+)\]\s*(.*)", first)
+    if not m:
+        return first[:500]
+    msg = f"[Error {m.group(1)}] {m.group(2).strip()}"[:400]
+    hint = ERROR_HINTS.get(m.group(1))
+    return f"{msg} → {hint}" if hint else msg
+
+
+def parameter_markers(sql: str) -> int:
+    """Number of ? parameter markers outside strings/comments (DBQL keeps them as written)."""
+    return strip_comments_and_strings(sql).count("?")
 
 
 def _format_type(type_code, length, total, frac) -> str:
@@ -114,7 +135,10 @@ class TeradataClient:
         """Run EXPLAIN. Fails with the real Teradata error if the SQL is invalid
         (syntax, missing objects, missing privileges) - the best validator."""
         body = sql.strip().rstrip(";")
-        _, rows = self._fetch("EXPLAIN " + body)
+        n = parameter_markers(body)
+        # DBQL SQL from applications keeps its ? markers; bind a dummy value so the plan can be built
+        # (the plan for the real values may differ - the session reports this as a note)
+        _, rows = self._fetch("EXPLAIN " + body, ["1"] * n if n else None)
         return "\n".join(str(r[0]) for r in rows)
 
     def run_select(self, sql: str) -> tuple[list[str], list[tuple]]:

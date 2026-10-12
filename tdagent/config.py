@@ -55,6 +55,8 @@ class TuningConfig:
     redistribute_rows: int = 10_000_000
     scan_rows: int = 1_000_000
     spool_rows: int = 100_000_000
+    spool_bytes: int = 1_000_000_000  # a single spool this large (wide rows) is worth trimming
+    stats_min_rows: int = 10_000      # no-confidence estimates below this are not worth reporting
     # thresholds for DBQL / table findings
     cpu_skew_warn: float = 2.0
     cpu_skew_crit: float = 5.0

@@ -1,0 +1,73 @@
+ This request is eligible for incremental planning and execution (IPE)
+ but does not meet cost thresholds. The following is the static plan
+ for the request.
+  1) First, we lock SALES_DB.c in view SalesV in TD_MAP1 for access, we
+     lock SALES_DB.t in view SalesV in TD_MAP1 for access, and we lock
+     SALES_DB.p in view SalesV in TD_MAP1 for access.
+  2) Next, we lock DBC.tvm in view SALES_DB.SalesV in
+     TD_DATADICTIONARYMAP for access.
+  3) We do an all-AMPs STAT FUNCTION step in TD_MAP1 from
+     SALES_DB.p in view SalesV by way of an all-rows scan with no
+     residual conditions into Spool 18 (Last Use), which is redistributed
+     by hash code to all AMPs in TD_MAP1.  The result rows are put into
+     Spool 16 (all_amps), which is built locally on the AMPs.  The size is
+     estimated with low confidence to be 12 rows (72,600 bytes).  The
+     estimated time for this step is 0.00 seconds.
+  4) We execute the following steps in parallel.
+       1) We do an all-AMPs RETRIEVE step in TD_MAP1 from Spool 16
+          (Last Use) by way of an all-rows scan into Spool 5 (all_amps),
+          which is duplicated on all AMPs in TD_MAP1.  The size of Spool 5
+          is estimated with low confidence to be 12 rows (70,008 bytes).
+          The estimated time for this step is 0.00 seconds.
+       2) We do an all-AMPs RETRIEVE step in TD_MAP1 from SALES_DB.c in
+          view SalesV by way of an all-rows scan with a condition of
+          ("(NOT (SALES_DB.c in view SalesV.CUST_NM IS NULL )) AND
+          ((TRIM(BOTH FROM SALES_DB.c in view SalesV.GRADE_CD ))= 'V')")
+          into Spool 21 (all_amps), which is redistributed by the hash
+          code of ( TRIM(BOTH FROM SALES_DB.c.REGION_CD), (SUBSTR(
+          SALES_DB.c.CUST_NM ,1 ,2 ))) to all AMPs in TD_MAP1.  The size
+          of Spool 21 is estimated with no confidence to be 36,000 rows
+          (10,404,000 bytes).  The estimated time for this step is 0.02
+          seconds.
+  5) We do an all-AMPs JOIN step in TD_MAP1 from Spool 5 (Last Use) by
+     way of an all-rows scan, which is joined to Spool 21 (Last Use) by
+     way of an all-rows scan.  Spool 5 and Spool 21 are joined using a
+     product join, with a join condition of ("(1=1)").  The result goes
+     into Spool 22 (all_amps), which is built locally on the AMPs.  The
+     size of Spool 22 is estimated with no confidence to be 432,000 rows
+     (12,960,000 bytes).  The estimated time for this step is 0.03
+     seconds.
+  6) We do an all-AMPs JOIN step in TD_MAP1 from Spool 22 (Last Use) by
+     way of a RowHash match scan, which is joined to SALES_DB.t in view
+     SalesV by way of a RowHash match scan with no residual conditions.
+     Spool 22 and SALES_DB.t are left outer joined using a merge join,
+     with condition(s) used for non-matching on left table ("NOT
+     (CUST_ID IS NULL)"), with a join condition of ("CUST_ID =
+     SALES_DB.t.CUST_ID").  The result goes into Spool 23 (all_amps),
+     which is redistributed by the hash code of ('ONLINE') to few AMPs
+     in TD_MAP1.  The size of Spool 23 is estimated with no confidence
+     to be 42,549 rows (5,448,229,254 bytes).  The estimated time for
+     this step is 2.14 seconds.
+  7) We do an all-AMPs JOIN step in TD_MAP1 from Spool 23 (Last Use) by
+     way of an all-rows scan, which is joined to 4294967296 partitions
+     of SALES_DB.SALES_TXN with a condition of ("(SALES_DB.SALES_TXN.QTY
+     >= 1)").  Spool 23 and SALES_DB.SALES_TXN are right outer joined
+     using a single partition hash join, with condition(s) used for
+     non-matching on right table ("NOT (CUST_ID IS NULL)"), with a join
+     condition of ("SALES_DB.SALES_TXN.CUST_ID = CUST_ID").  The result
+     goes into Spool 24 (all_amps), which is redistributed by to all
+     AMPs in TD_MAP1.  Then we do a SORT to order Spool 24 by field Id 1.
+     The size of Spool 24 is estimated with low confidence to be 758
+     rows (23,498 bytes).  The estimated time for this step is 0.00
+     seconds.
+  8) We do an all-AMPs STAT FUNCTION step in TD_MAP1 from Spool 24 (Last
+     Use) by way of an all-rows scan into Spool 25 (Last Use), which is
+     assumed to be redistributed by value to all AMPs in TD_MAP1.  The
+     result rows are put into Spool 3 (group_amps), which is built
+     locally on the AMPs.  This step is used to retrieve the TOP 101
+     rows.  The size is estimated with no confidence to be 20 rows (
+     185,080 bytes).
+  9) Finally, we send out an END TRANSACTION step to all AMPs involved
+     in processing the request.
+  -> The contents of Spool 3, are sent back to the user as the result
+     of statement 1.

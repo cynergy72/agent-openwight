@@ -12,6 +12,7 @@
     tdagent tune q.sql --explain e.txt 붙여넣은 EXPLAIN 으로 진단 (DB 미연결)
     tdagent dbql --days 1 --by skew    DBQL 고부하 쿼리
     tdagent skills                     튜닝 포인트 카탈로그
+    tdagent explain-check top50.txt    추출한 실제 EXPLAIN 들로 파서·탐지 점검
 """
 
 from __future__ import annotations
@@ -282,6 +283,46 @@ def cmd_dbql(cfg: Config, args) -> int:
     return 0
 
 
+def cmd_explain_check(cfg: Config, args) -> int:
+    from .tuning.corpus import check, load_extract
+    from .tuning.findings import SEVERITY_ICON, from_explain, sort_findings
+    from .tuning.sqlcheck import analyze_sql
+
+    plans = load_extract(args.file)
+    cov = check(plans)
+    store = SchemaStore.load_dir(cfg.path(cfg.agent.schema_dir))
+    severity_count: dict[str, int] = {}
+    for p in plans:
+        if p.parsed is None:
+            if args.verbose_plans:
+                console.print(Text(f"[{p.n}] EXPLAIN 실패: {p.error[:160]}", style="yellow"))
+            continue
+        findings = sort_findings(from_explain(p.parsed, cfg.tuning) + analyze_sql(p.sql, store))
+        for f in findings:
+            severity_count[f.code] = severity_count.get(f.code, 0) + 1
+        if args.verbose_plans:
+            t = p.parsed.total_time
+            console.print(Text(f"[{p.n}] 단계 {len(p.parsed.steps)} · 예상 {t if t is not None else '-'}s "
+                               f"({p.parsed.total_time_source or '없음'}) · {p.meta.get('User', '')}", style="bold"))
+            console.print(Text(p.parsed.summary()))
+            for f in findings:
+                if f.severity != "info":
+                    console.print(Text(f"  {SEVERITY_ICON[f.severity]} {f.code}: {f.detail[:140]}"))
+    console.print(f"계획 {cov.plans}개 파싱, EXPLAIN 실패 {cov.failed}개")
+    for k, v in sorted(cov.counts.items()):
+        console.print(Text(f"  {k:<40} {v}"))
+    console.print("탐지 결과:")
+    for k, v in sorted(severity_count.items(), key=lambda x: -x[1]):
+        console.print(Text(f"  {k:<28} {v}"))
+    if cov.problems:
+        console.print(f"[yellow]파서가 놓친 부분 {len(cov.problems)}건:[/yellow]")
+        for prob in cov.problems[:50]:
+            console.print(Text("  " + prob))
+        return 1
+    console.print("[green]놓친 문구 없음[/green]")
+    return 0
+
+
 def cmd_skills(cfg: Config, query: str) -> int:
     from .skills import SkillLibrary
 
@@ -359,6 +400,9 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--by", choices=["cpu", "io", "impact", "skew", "spool"], default="cpu")
     d.add_argument("--top", type=int, default=20)
     d.add_argument("--save", help="QueryID 또는 'top' - 전체 SQL 을 파일로 저장")
+    ec = sub.add_parser("explain-check", help="실제 EXPLAIN 추출본으로 파서·탐지 점검")
+    ec.add_argument("file")
+    ec.add_argument("--plans", dest="verbose_plans", action="store_true", help="계획별 요약과 탐지 결과 출력")
     k = sub.add_parser("skills", help="튜닝 포인트 카탈로그")
     k.add_argument("query", nargs="?", default="")
     w = sub.add_parser("web")
@@ -387,6 +431,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_tune(cfg, args)
     if args.cmd == "dbql":
         return cmd_dbql(cfg, args)
+    if args.cmd == "explain-check":
+        return cmd_explain_check(cfg, args)
     if args.cmd == "skills":
         return cmd_skills(cfg, args.query)
     return 2

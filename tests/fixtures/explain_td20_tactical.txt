@@ -1,0 +1,23 @@
+  1) First, we do a single-AMP JOIN step from SALES_DB.c by way of the
+     unique primary index "SALES_DB.c.CUST_ID = 1" with no residual
+     conditions, which is joined to all partitions of SALES_DB.t by way
+     of the primary index "SALES_DB.t.CUST_ID = SALES_DB.c.CUST_ID" with
+     no residual conditions.  SALES_DB.c and SALES_DB.t are joined using
+     a nested join, with a join condition of ("(1=1)").  The result goes
+     into Spool 2 (one-amp), which is built locally on that AMP.  The
+     size of Spool 2 is estimated with low confidence to be 2 rows (
+     32,966 bytes).  The estimated time for this step is 0.00 seconds.
+  2) Next, we do a single-AMP STAT FUNCTION step from Spool 2 (Last
+     Use) by way of the hash value of "SALES_DB.t.CUST_ID = :?,
+     SALES_DB.t.SALE_DT = :?" into Spool 5 (Last Use), which is built
+     locally on that AMP in TD_MAP1.  The result rows are put into Spool
+     8 (one-amp), which is built locally on that AMP.  The size is
+     estimated with low confidence to be 1 row ( 1,046 bytes).
+  3) We do a two-AMP RETRIEVE step in TD_MAP1 from SALES_DB.PRODUCT by
+     way of unique index # 4 "SALES_DB.PRODUCT.PROD_NM = :?" with no
+     residual conditions into Spool 9 (group_amps), which is built
+     locally on the AMPs.  The estimated time for this step is 0.00
+     seconds.
+  4) Finally, we send out an END TRANSACTION step to all AMPs involved
+     in processing the request.
+  -> As the result of statement 1.

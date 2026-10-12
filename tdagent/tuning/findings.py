@@ -31,6 +31,7 @@ FINDING_INFO: dict[str, tuple[str, str, list[str], str]] = {
     "STATS_LOW_CONFIDENCE": ("통계 부족 (low confidence)", "info", ["TP-STAT-02"], "B"),
     "STATS_RECOMMENDED": ("옵티마이저 통계 권고 (HELPSTATS)", "info", ["TP-STAT-03"], "B"),
     "LARGE_SPOOL": ("대용량 스풀", "warning", ["TP-RES-01", "TP-RW-01"], "A"),
+    "SKEWED_REDISTRIBUTION": ("소수 AMP 로 재분배 (스큐)", "warning", ["TP-SKEW-06", "TP-SKEW-02"], "A"),
     "HOTSPOT_STEP": ("병목 단계", "info", ["TP-EXP-01"], "A"),
     # SQL patterns (sqlcheck.py)
     "COMMA_JOIN": ("콤마 조인 / 조인 조건 누락 위험", "warning", ["TP-JOIN-01"], "A"),
@@ -123,61 +124,90 @@ def count_by_severity(findings: list[Finding]) -> dict[str, int]:
 # EXPLAIN
 # --------------------------------------------------------------------------- #
 
-_FUNC_ON_COL = re.compile(r"\b(CAST|SUBSTR|SUBSTRING|TRIM|EXTRACT|TRUNC|OREPLACE|UPPER|LOWER|COALESCE)\s*\(\s*\(?"
-                          r"\s*[A-Za-z_][\w$#]*\.[A-Za-z_][\w$#]*\.", re.I)
+_FUNC_ON_COL = re.compile(r"\b(CAST|SUBSTR|SUBSTRING|TRIM|EXTRACT|TRUNC|OREPLACE|UPPER|LOWER|COALESCE)\s*\(\s*\(*\s*"
+                          r"(?:(?:BOTH|LEADING|TRAILING)\s+FROM\s+)?(?:YEAR\s+FROM\s+|MONTH\s+FROM\s+|DAY\s+FROM\s+)?"
+                          r"[A-Za-z_][\w$#]*(?:\s+in view\s+[\w$#]+)?\.[A-Za-z_]", re.I)
+
+
+def _product_join(s, share: float) -> Finding:
+    cmp = s.product_comparisons
+    rows = s.est_rows or 0
+    inputs = " × ".join("?" if r is None else f"{r:,}" for r in s.input_rows) or "?"
+    detail = f"{s.join_type + ' ' if s.join_type not in ('', 'inner') else ''}{s.join_method} join, " \
+             f"입력 {inputs}행 → 결과 {rows:,}행"
+    if s.small_product_join and share < 0.2:
+        return Finding("PRODUCT_JOIN", detail + " (한쪽이 아주 작아 대개 정상)", evidence=s.join_condition or s.summary(),
+                       step=s.label, tables=s.lineage, severity="info")
+    big = (cmp is not None and cmp >= 1_000_000_000) or (cmp is None and rows >= 100_000) or share >= 0.2
+    return Finding("PRODUCT_JOIN", detail, evidence=s.join_condition or s.summary(), step=s.label,
+                   tables=s.lineage, severity="critical" if big else "warning")
 
 
 def from_explain(p: ParsedExplain, cfg: TuningConfig, partitioned: set[str] | None = None) -> list[Finding]:
     partitioned = {t.lower() for t in partitioned or set()}
     out: list[Finding] = []
     total = p.total_time or 0
+    no_conf, low_conf = [], []
 
     for s in p.steps:
         rows = s.est_rows or 0
+        share = (s.est_time or 0) / total if total else 0
         if "product" in s.join_method:
-            share = (s.est_time or 0) / total if total else 0
-            sev = "critical" if rows >= 100_000 or share >= 0.2 else "warning"
-            out.append(Finding("PRODUCT_JOIN", f"{s.join_method} join, 결과 {rows:,}행 예상",
-                               evidence=s.join_condition or s.text[:300], step=s.label, tables=s.tables,
-                               severity=sev))
+            out.append(_product_join(s, share))
         if s.geography == "duplicated" and rows >= cfg.dup_rows:
             out.append(Finding("DUPLICATE_LARGE", f"{rows:,}행을 모든 AMP 로 복제 ({s.confidence or '?'} confidence)",
-                               evidence=s.text[:300], step=s.label, tables=s.tables))
+                               evidence=s.summary(), step=s.label, tables=s.lineage))
         if s.geography == "redistributed" and rows >= cfg.redistribute_rows:
-            out.append(Finding("REDISTRIBUTE_LARGE", f"{rows:,}행 재분배, 키: {s.redistribute_keys}",
-                               evidence=s.text[:300], step=s.label, tables=s.tables))
+            out.append(Finding("REDISTRIBUTE_LARGE", f"{rows:,}행 재분배, 키: {s.redistribute_keys or '(내부 키)'}",
+                               evidence=s.summary(), step=s.label, tables=s.lineage))
+        if s.redistribute_target == "few":
+            out.append(Finding("SKEWED_REDISTRIBUTION",
+                               f"재분배 결과가 소수 AMP 로 몰립니다 (키: {s.redistribute_keys or '?'}, {rows:,}행)",
+                               evidence=s.summary(), step=s.label, tables=s.lineage,
+                               severity="critical" if rows >= cfg.redistribute_rows else
+                               "warning" if rows >= cfg.stats_min_rows else "info"))
         if s.join_condition and re.search(r"\b(CAST|TRANSLATE)\s*\(", s.join_condition, re.I):
             out.append(Finding("JOIN_CONVERSION", "조인 조건에 형변환이 있습니다",
-                               evidence=s.join_condition, step=s.label, tables=s.tables))
+                               evidence=s.join_condition, step=s.label, tables=s.lineage))
         for sc in s.scans:
             if not sc.full_scan:
                 continue
             if sc.table.lower() in partitioned:
-                out.append(Finding("PARTITION_NOT_ELIMINATED", f"{sc.table} 를 파티션 제거 없이 전체 스캔",
-                                   evidence=s.text[:300], step=s.label, tables=[sc.table]))
+                out.append(Finding("PARTITION_NOT_ELIMINATED",
+                                   f"{sc.label} 를 파티션 제거 없이 전체 스캔"
+                                   + (" (모든 파티션)" if sc.partitions else ""),
+                                   evidence=s.summary(), step=s.label, tables=[sc.table]))
             elif rows >= cfg.scan_rows:
-                out.append(Finding("FULL_SCAN_LARGE", f"{sc.table} 전체 스캔, 결과 {rows:,}행 예상",
-                                   evidence=s.text[:300], step=s.label, tables=[sc.table]))
-        for cond in s.conditions + ([s.join_condition] if s.join_condition else []):
-            if _FUNC_ON_COL.search(cond):
-                out.append(Finding("NON_SARGABLE", "실행 계획의 조건에서 컬럼이 함수로 감싸져 있습니다",
-                                   evidence=cond, step=s.label, tables=s.tables))
-                break
-        if s.confidence == "no" and (s.scans or s.join_method or rows):
-            out.append(Finding("STATS_NO_CONFIDENCE", f"추정 {rows:,}행이 통계 없이 추정됨",
-                               evidence=s.summary(), step=s.label, tables=s.tables))
+                out.append(Finding("FULL_SCAN_LARGE", f"{sc.label} 전체 스캔, 결과 {rows:,}행 예상",
+                                   evidence=s.summary(), step=s.label, tables=[sc.table]))
+        if any(sc.full_scan for sc in s.scans):
+            for cond in s.conditions:
+                if _FUNC_ON_COL.search(cond):
+                    out.append(Finding("NON_SARGABLE", "전체 스캔 단계의 조건에서 컬럼이 함수로 감싸져 있습니다",
+                                       evidence=cond[:400], step=s.label, tables=s.tables))
+                    break
+        if s.confidence == "no" and (rows >= cfg.stats_min_rows or share >= 0.1):
+            no_conf.append(s)
         elif s.confidence == "low" and rows >= cfg.scan_rows:
-            out.append(Finding("STATS_LOW_CONFIDENCE", f"추정 {rows:,}행 (low confidence)",
-                               evidence=s.summary(), step=s.label, tables=s.tables))
-        if rows >= cfg.spool_rows:
+            low_conf.append(s)
+        if rows >= cfg.spool_rows or (s.est_bytes or 0) >= cfg.spool_bytes:
+            width = f", 행당 약 {s.est_bytes // max(rows, 1):,} bytes" if s.est_bytes else ""
             out.append(Finding("LARGE_SPOOL", f"스풀 {rows:,}행"
-                               + (f" ({s.est_bytes:,} bytes)" if s.est_bytes else ""),
-                               evidence=s.summary(), step=s.label, tables=s.tables))
+                               + (f" / {s.est_bytes:,} bytes{width}" if s.est_bytes else ""),
+                               evidence=s.summary(), step=s.label, tables=s.lineage))
+
+    for code, steps in (("STATS_NO_CONFIDENCE", no_conf), ("STATS_LOW_CONFIDENCE", low_conf)):
+        if steps:
+            tables = list(dict.fromkeys(t for st in steps for t in st.lineage))
+            listed = ", ".join(f"{st.label}({st.est_rows or 0:,}행)" for st in steps[:8])
+            more = f" 외 {len(steps) - 8}개" if len(steps) > 8 else ""
+            out.append(Finding(code, f"{len(steps)}개 단계가 통계 없이/부족하게 추정됨: {listed}{more}",
+                               evidence="\n".join(st.summary() for st in steps[:5]), tables=tables))
 
     hot = p.hotspot
     if hot and total and hot.est_time and hot.est_time / total >= 0.5 and len(p.steps) > 2:
         out.append(Finding("HOTSPOT_STEP", f"전체 예상 시간의 {hot.est_time / total:.0%} 가 이 단계",
-                           evidence=hot.summary(), step=hot.label, tables=hot.tables))
+                           evidence=hot.summary(), step=hot.label, tables=hot.lineage))
     if p.helpstats:
         out.append(Finding("STATS_RECOMMENDED", f"옵티마이저가 통계 {len(p.helpstats)}건을 권고",
                            evidence="\n".join(p.helpstats[:10])))

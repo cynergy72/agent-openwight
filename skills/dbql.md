@@ -34,4 +34,7 @@ findings: [CPU_SKEW, IO_SKEW, PRODUCT_JOIN_SUSPECT, UNNECESSARY_IO, LARGE_SPOOL]
 ## 주의
 - DBQL SQL 이 volatile table 을 참조하면 지금 세션에 그 테이블이 없어 EXPLAIN 이 실패한다 → 앞선 CREATE VOLATILE 문을 함께 확인.
 - 매크로/프로시저 호출(EXEC, CALL)은 내부 SQL 을 따로 찾아야 한다.
+- 애플리케이션 SQL 의 `?` 파라미터 마커는 그대로 EXPLAIN 할 수 없어 더미 값을 바인딩한다. 실제 값의 선택도에 따라
+  계획이 달라질 수 있으므로, 중요한 쿼리는 대표 값을 넣어 다시 EXPLAIN 한다.
+- EXPLAIN 도 대상 객체의 SELECT 권한이 필요하다 (Error 3523). DBQL/PDCR 이력 테이블처럼 권한이 제한된 객체는 실패할 수 있다.
 - 실행마다 동시 부하에 따라 지표 편차가 있다.
