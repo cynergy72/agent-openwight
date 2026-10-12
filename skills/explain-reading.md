@@ -60,6 +60,9 @@ EXPLAIN 은 실행하지 않고 실행 계획만 보여준다. 예상 행 수·�
 | `We spoil the parser's dictionary cache` / `We flush the DISKSPACE caches` | DDL/DML 후 캐시 처리 | 정보 |
 | `executing table operator TD_SYSFNLIB.QGINITIATORIMPORT` | QueryGrid 원격 조회 | 원격 계획 블록 확인 (querygrid 스킬) |
 | `< BEGIN EXPLAIN FOR REMOTE QUERY --> ... <-- END ... >` | 원격 시스템의 실행 계획 | 원격 SQL·전체 스캔·추정 행 수 확인 |
+| `[No explain information added from target]` | 원격(예: SQL Server)이 계획을 주지 않음 - 원격 SQL 만 확인 가능 | 원격 SQL 의 조건·컬럼 폭 확인 |
+| 원격 조회 단계 `estimated with no confidence to be 60,000 rows` | 원격 행 수를 모르는 기본 추정 | 이후 조인·적재 추정 전부 불확실 (TP-QG-04) |
+| `TRANSLATE((col) USING LATIN_TO_UNICODE)` (조인 조건) | 문자셋 변환 후 비교 | 문자셋 불일치 (TP-JOIN-13, TP-TYPE-02) |
 | `BEGIN RECOMMENDED STATS FOR FINAL PLAN / OTHER PLANS ->` | HELPSTATS 통계 권고 (신뢰도 표시) | 선별 적용 (TP-STAT-06) |
 
 ## TP-EXP-01 병목 단계

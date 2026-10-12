@@ -1,0 +1,69 @@
+ This request is eligible for incremental planning and execution (IPE)
+ but does not meet cost thresholds. The following is the static plan
+ for the request.
+  1) First, we lock SALES_DB.SOURCE_COLUMNS in TD_MAP1 for write on a
+     reserved RowHash to prevent global deadlock.
+  2) Next, we lock SALES_DB.SOURCE_COLUMNS in TD_MAP1 for write.
+  3) We do an all-AMPs RETRIEVE step executing table operator
+     TD_SYSFNLIB.QGINITIATORIMPORT in TD_MAP1 with a condition of (
+     "(1=1)").
+     < BEGIN EXPLAIN FOR REMOTE QUERY -->
+     Query steps:
+     SELECT OWNER ,TABLE_NAME ,COLUMN_NAME ,DATA_TYPE FROM
+     SYS.DBA_TAB_COLUMNS WHERE (NOT (OWNER IS NULL )) AND ((NOT
+     (TABLE_NAME IS NULL )) AND (NOT (COLUMN_NAME IS NULL )))
+     /*0001_EXEC*/
+     Remote Queries:
+     1. EXPLAIN PLAN SET STATEMENT_ID = 'a1' FOR SELECT OWNER
+     ,TABLE_NAME ,COLUMN_NAME ,DATA_TYPE FROM SYS.DBA_TAB_COLUMNS
+     2. [Statement_ID=a1, Plan_ID=114, Operation=SELECT STATEMENT,
+     Options=, Object_Owner=, Object_Name=, Object_Type=, ID=0,
+     Parent_ID=, Cost=1144, Cardinality=7, Bytes=1631,
+     Access_Predicates=, Filter_Predicates=, Statement_ID=a1,
+     Plan_ID=114, Operation=TABLE ACCESS, Options=BY INDEX ROWID
+     BATCHED, Object_Owner=SYS, Object_Name=OBJ$, Object_Type=TABLE,
+     ID=1, Cardinality=7, Statement_ID=a1, Plan_ID=114,
+     Operation=INDEX, Options=RANGE SCAN, Object_Owner=SYS,
+     Object_Name=I_OBJ1, Object_Type=INDEX, ID=2, Cardinality=7,
+     Statement_ID=a1, Plan_ID=114, Operation=TABLE ACCESS,
+     Options=FULL, Object_Owner=SYS, Object_Name=COL$,
+     Object_Type=TABLE, ID=3, Cardinality=120000,
+     Filter_Predicates="C"."NAME" IS NOT NULL]
+     <-- END EXPLAIN FOR REMOTE QUERY >
+     The size of Spool 2 is estimated with no confidence to be 60,000
+     rows (11,880,000 bytes).  The estimated time for this step is 0.01
+     seconds.
+  4) We do an all-AMPs RETRIEVE step executing table operator
+     TD_SYSFNLIB.QGINITIATORIMPORT in TD_MAP1 with a condition of (
+     "(1=1)").
+     < BEGIN EXPLAIN FOR REMOTE QUERY -->
+     Remote Queries:
+     1.
+ SELECT s.NAME AS Schema_Name, t.NAME AS Table_Name,
+     CONVERT(VARCHAR(Max), ep.VALUE) AS Table_Comment
+ FROM sys.tables t
+ JOIN sys.schemas s ON s.schema_id = t.schema_id
+ LEFT JOIN
+     sys.extended_properties ep ON ep.major_id = t.object_id
+     [No explain information added from target]
+     <-- END EXPLAIN FOR REMOTE QUERY >
+     The size of Spool 3 is estimated with no confidence to be 60,000
+     rows (2,572,740,000 bytes).  The estimated time for this step is
+     0.01 seconds.
+  5) We do an all-AMPs JOIN step in TD_MAP1 from Spool 2 (Last Use) by
+     way of an all-rows scan, which is joined to Spool 3 (Last Use) by
+     way of an all-rows scan.  Spool 2 and Spool 3 are joined using a
+     hash join, with a join condition of ("(OWNER = (TRANSLATE((
+     Schema_Name )USING LATIN_TO_UNICODE))) AND (TABLE_NAME =
+     Table_Name)").  The result goes into Spool 1 (all_amps), which is
+     redistributed by hash code to all AMPs in TD_MAP1.  The size of
+     Spool 1 is estimated with no confidence to be 14,696,939 rows (
+     46,368,842,545 bytes).  The estimated time for this step is 2,651.24
+     seconds.
+  6) We do an all-AMPs MERGE step in TD_MAP1 into SALES_DB.SOURCE_COLUMNS
+     from Spool 1 (Last Use).  The size is estimated with no confidence
+     to be 14,696,939 rows.  The estimated time for this step is 29.75
+     seconds.
+  7) Finally, we send out an END TRANSACTION step to all AMPs involved
+     in processing the request.
+  -> No rows are returned to the user as the result of statement 1.

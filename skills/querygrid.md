@@ -2,7 +2,7 @@
 name: querygrid
 description: QueryGrid 원격 조회 튜닝 - 원격 실행 계획 읽기, 조건·컬럼 pushdown, 원격 전체 스캔, 원격 결과와 로컬 조인
 category: 접근경로
-findings: [REMOTE_QUERY, REMOTE_FULL_TRANSFER]
+findings: [REMOTE_QUERY, REMOTE_FULL_TRANSFER, REMOTE_ESTIMATE_JOIN, REMOTE_WIDE_ROWS]
 ---
 # QueryGrid 원격 조회
 
@@ -31,11 +31,22 @@ QueryGrid 로 원격 시스템(Oracle, Hadoop, 다른 Teradata 등)의 테이블
   `SELECT ... FROM FOREIGN TABLE (원격 SQL)@서버 AS t` 를 검토 (커넥터별 지원 여부 확인).
 - 조치(C): 원격 테이블에 조건 컬럼 인덱스/파티션.
 
-## TP-QG-04 원격 결과와 로컬 대용량 테이블 조인
-- 신호: 원격 조회 결과 스풀이 `no confidence` 인데 다음 단계에서 로컬 대용량 테이블과 조인 (복제·product join 위험)
+## TP-QG-04 원격 결과의 추정 오류와 조인
+- 신호: 원격 조회 결과 스풀이 `no confidence` (흔히 기본값 60,000행) 인데 그 결과끼리 또는 로컬 테이블과 조인.
+  원격 계획의 Cardinality 와 크게 다르면 조인 결과·시간이 터무니없이 추정된다
+  (실제 사례: 원격 추정 7행·2,560행인 두 결과를 각각 60,000행으로 보고 해시 조인 → 1,470만 행·2,651초로 추정,
+  실제 CPU 는 2.7초). 추정이 틀리면 조인 방식·재분배·스풀 할당이 모두 틀어진다.
 - 조치(A, 다중 문장): 원격 결과를 volatile table 에 먼저 적재 → 조인 키를 PI 로, `COLLECT STATISTICS` 후 조인.
   옵티마이저가 실제 행 수를 알게 되어 조인 계획이 안정된다.
 
 ## TP-QG-05 같은 원격 데이터의 반복 조회
 - 신호: 같은 외부 테이블을 여러 쿼리·배치에서 반복 조회 (DBQL 에서 같은 QGINITIATORIMPORT 패턴이 반복)
 - 조치(C): 자주 쓰는 원격 데이터는 주기 적재(ETL)로 로컬 테이블에 두고 조회한다. 실시간성이 필요한 경우만 원격 조회.
+
+## TP-QG-06 원격 컬럼이 넓은 타입으로 매핑됨
+- 신호: 원격 조회 스풀의 행당 bytes 가 매우 큼 (예: 60,000행에 2.5GB, 행당 약 43KB),
+  원격 SQL 에 `VARCHAR(MAX)`, `NVARCHAR(MAX)`, `CLOB`, `TEXT` 등
+- 원인: 원격의 가변·대용량 문자 타입이 Teradata 쪽에서 최대 길이로 잡혀 스풀·네트워크·적재가 모두 커진다.
+- 조치(A): 원격 쪽에서 필요한 길이로 줄여 가져온다 (예: SQL Server `CONVERT(VARCHAR(4000), col)`,
+  Oracle `SUBSTR(col, 1, 4000)`), 또는 Teradata 쪽 SELECT 에서 `CAST(col AS VARCHAR(n))`. 필요 없는 긴 컬럼은 빼기.
+- 검증: 원격 조회 단계 스풀 bytes 감소.

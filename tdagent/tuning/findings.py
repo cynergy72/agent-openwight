@@ -34,6 +34,8 @@ FINDING_INFO: dict[str, tuple[str, str, list[str], str]] = {
     "SKEWED_REDISTRIBUTION": ("소수 AMP 로 재분배 (스큐)", "warning", ["TP-SKEW-06", "TP-SKEW-02"], "A"),
     "REMOTE_QUERY": ("QueryGrid 원격 조회", "info", ["TP-QG-01", "TP-QG-04"], "A"),
     "REMOTE_FULL_TRANSFER": ("원격 테이블 전체 전송", "warning", ["TP-QG-02", "TP-QG-03"], "A"),
+    "REMOTE_ESTIMATE_JOIN": ("원격 데이터 추정에 기댄 조인/집계", "warning", ["TP-QG-04", "TP-STAT-01"], "A"),
+    "REMOTE_WIDE_ROWS": ("원격 결과 행 폭 과다", "warning", ["TP-QG-06", "TP-QG-02"], "A"),
     "HOTSPOT_STEP": ("병목 단계", "info", ["TP-EXP-01"], "A"),
     # SQL patterns (sqlcheck.py)
     "COMMA_JOIN": ("콤마 조인 / 조인 조건 누락 위험", "warning", ["TP-JOIN-01"], "A"),
@@ -131,6 +133,16 @@ _FUNC_ON_COL = re.compile(r"\b(CAST|SUBSTR|SUBSTRING|TRIM|EXTRACT|TRUNC|OREPLACE
                           r"[A-Za-z_][\w$#]*(?:\s+in view\s+[\w$#]+)?\.[A-Za-z_]", re.I)
 
 
+def _conversions(cond: str) -> str:
+    """'TargetDatabase LATIN_TO_UNICODE, CUST_ID → VARCHAR(10)' from a join condition."""
+    out = []
+    for col, how in re.findall(r"TRANSLATE\s*\(\s*\(*\s*([\w$#.]+)\s*\)*\s*USING\s+(\w+)", cond, re.I):
+        out.append(f"{col.split('.')[-1]} {how.upper()}")
+    for col, typ in re.findall(r"CAST\s*\(\s*\(*\s*([\w$#.]+)\s*\)*\s*AS\s+([\w() ,]+?)\)", cond, re.I):
+        out.append(f"{col.split('.')[-1]} → {typ.strip()}")
+    return ", ".join(dict.fromkeys(out)) or "CAST/TRANSLATE"
+
+
 def _product_join(s, share: float) -> Finding:
     cmp = s.product_comparisons
     rows = s.est_rows or 0
@@ -156,12 +168,13 @@ def from_explain(p: ParsedExplain, cfg: TuningConfig, partitioned: set[str] | No
     for s in p.steps:
         rows = s.est_rows or 0
         share = (s.est_time or 0) / total if total else 0
+        guess = bool(s.remote_origins) and not s.lineage  # sizes derived only from remote (no-confidence) data
         if "product" in s.join_method:
             out.append(_product_join(s, share))
-        if s.geography == "duplicated" and rows >= cfg.dup_rows:
+        if s.geography == "duplicated" and rows >= cfg.dup_rows and not guess:
             out.append(Finding("DUPLICATE_LARGE", f"{rows:,}행을 모든 AMP 로 복제 ({s.confidence or '?'} confidence)",
                                evidence=s.summary(), step=s.label, tables=s.lineage))
-        if s.geography == "redistributed" and rows >= cfg.redistribute_rows:
+        if s.geography == "redistributed" and rows >= cfg.redistribute_rows and not guess:
             out.append(Finding("REDISTRIBUTE_LARGE", f"{rows:,}행 재분배, 키: {s.redistribute_keys or '(내부 키)'}",
                                evidence=s.summary(), step=s.label, tables=s.lineage))
         if s.redistribute_target == "few":
@@ -171,8 +184,9 @@ def from_explain(p: ParsedExplain, cfg: TuningConfig, partitioned: set[str] | No
                                severity="critical" if rows >= cfg.redistribute_rows else
                                "warning" if rows >= cfg.stats_min_rows else "info"))
         if s.join_condition and re.search(r"\b(CAST|TRANSLATE)\s*\(", s.join_condition, re.I):
-            out.append(Finding("JOIN_CONVERSION", "조인 조건에 형변환이 있습니다",
-                               evidence=s.join_condition, step=s.label, tables=s.lineage))
+            out.append(Finding("JOIN_CONVERSION", "조인 조건에 형변환: " + _conversions(s.join_condition)
+                               + (" (원격 데이터와 비교)" if s.remote_origins else ""),
+                               evidence=s.join_condition[:400], step=s.label, tables=s.lineage))
         for sc in s.scans:
             if not sc.full_scan:
                 continue
@@ -191,13 +205,13 @@ def from_explain(p: ParsedExplain, cfg: TuningConfig, partitioned: set[str] | No
                                        evidence=cond[:400], step=s.label, tables=s.tables))
                     break
         remote = s.remote is not None or "QGINITIATOR" in s.table_operator.upper()
-        if remote:
-            pass  # remote row counts can't be fixed with local statistics - reported as REMOTE_QUERY
+        if remote or (s.remote_origins and not s.lineage):
+            pass  # estimates over remote data can't be fixed with local statistics - see REMOTE_* findings
         elif s.confidence == "no" and (rows >= cfg.stats_min_rows or share >= 0.1):
             no_conf.append(s)
         elif s.confidence == "low" and rows >= cfg.scan_rows:
             low_conf.append(s)
-        if rows >= cfg.spool_rows or (s.est_bytes or 0) >= cfg.spool_bytes:
+        if (rows >= cfg.spool_rows or (s.est_bytes or 0) >= cfg.spool_bytes) and not remote and not guess:
             width = f", 행당 약 {s.est_bytes // max(rows, 1):,} bytes" if s.est_bytes else ""
             out.append(Finding("LARGE_SPOOL", f"스풀 {rows:,}행"
                                + (f" / {s.est_bytes:,} bytes{width}" if s.est_bytes else ""),
@@ -215,20 +229,51 @@ def from_explain(p: ParsedExplain, cfg: TuningConfig, partitioned: set[str] | No
         r = s.remote
         if r is None and "QGINITIATOR" not in s.table_operator.upper():
             continue
-        objs = ", ".join(r.objects) if r and r.objects else "원격 테이블"
+        objs = ", ".join(r.objects[:5]) if r and r.objects else "원격 테이블"
         est = ""
         if r and r.cardinality is not None and s.est_rows:
             ratio = max(s.est_rows, 1) / max(r.cardinality, 1)
             if ratio >= 10 or ratio <= 0.1:
                 est = f" · Teradata 추정 {s.est_rows:,}행({s.confidence or '?'} conf) vs 원격 추정 {r.cardinality:,}행"
+        if r and not r.has_plan:
+            est += " · 원격 시스템이 실행 계획을 제공하지 않음"
         out.append(Finding("REMOTE_QUERY", f"{s.table_operator or 'QueryGrid'} 로 {objs} 를 가져옵니다{est}",
                            evidence=(r.sql if r else s.summary())[:400], step=s.label, tables=r.objects if r else []))
         if r and r.full_scan and not r.filtered:
+            scanned = ", ".join(r.full_scan_objects[:5]) or objs
             out.append(Finding("REMOTE_FULL_TRANSFER",
-                               f"원격 시스템에서 {objs} 를 조건 없이 전체 스캔해 전송합니다"
+                               f"원격 시스템에서 {scanned} 를 선택 조건 없이 전체 스캔해 전송합니다"
                                + (f" (원격 추정 {r.cardinality:,}행)" if r.cardinality is not None else ""),
-                               evidence=r.sql[:400], step=s.label, tables=r.objects,
-                               severity="warning"))
+                               evidence=r.sql[:400], step=s.label, tables=r.objects, severity="warning"))
+        width = (s.est_bytes or 0) // max(s.est_rows or 1, 1)
+        if (r and r.wide_columns) or width >= 4_000 or (s.est_bytes or 0) >= cfg.spool_bytes:
+            why = f"원격 SQL 에 {', '.join(r.wide_columns[:3])}" if r and r.wide_columns else "원격 컬럼 정의"
+            out.append(Finding("REMOTE_WIDE_ROWS",
+                               f"원격 결과 행 폭이 큽니다 (행당 약 {width:,} bytes, 스풀 {s.est_bytes or 0:,} bytes) - {why}",
+                               evidence=(r.sql if r else s.summary())[:400], step=s.label,
+                               tables=r.objects if r else [],
+                               severity="warning" if (s.est_bytes or 0) >= cfg.spool_bytes or width >= 4_000 else "info"))
+
+    # joins/aggregations whose inputs come from remote data: their sizes are guesses (no confidence)
+    for s in p.steps:
+        if not s.remote_origins or s.remote is not None or not (s.join_method or s.op in ("SUM", "JOIN")):
+            continue
+        rows = s.est_rows or 0
+        share = (s.est_time or 0) / total if total else 0
+        if rows < cfg.stats_min_rows and share < 0.2:
+            continue
+        remote_est = []
+        for lbl in s.remote_origins:
+            src = p.step(lbl)
+            if src is not None and src.remote is not None:
+                remote_est.append(f"단계 {lbl}: Teradata {src.est_rows or 0:,}행 / 원격 "
+                                  + (f"{src.remote.cardinality:,}행" if src.remote.cardinality is not None else "?"))
+        big = share >= 0.5 and ((s.est_time or 0) >= 60 or rows >= 1_000_000)
+        out.append(Finding("REMOTE_ESTIMATE_JOIN",
+                           f"원격 데이터 추정으로 계획된 {s.join_method + ' join' if s.join_method else s.op} 결과 "
+                           f"{rows:,}행 · {s.est_time or 0:g}s ({share:.0%}) - " + "; ".join(remote_est),
+                           evidence=s.summary(), step=s.label, tables=s.lineage,
+                           severity="critical" if big else "warning"))
 
     hot = p.hotspot
     if hot and total and hot.est_time and hot.est_time / total >= 0.5 and len(p.steps) > 2:

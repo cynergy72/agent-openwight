@@ -160,6 +160,7 @@ class Step:
     outputs: list[int] = field(default_factory=list)   # spool numbers written
     input_rows: list[int | None] = field(default_factory=list)  # filled from upstream steps
     lineage: list[str] = field(default_factory=list)  # base tables feeding this step, through spools
+    remote_origins: list[str] = field(default_factory=list)  # labels of QueryGrid steps feeding this step
 
     @property
     def tables(self) -> list[str]:
@@ -217,9 +218,12 @@ class Step:
             bits.append(f"table operator {self.table_operator}")
         if self.remote is not None:
             r = self.remote
-            bits.append(f"원격[{', '.join(r.objects) or '?'}{' 전체 스캔' if r.full_scan else ''}"
-                        f"{'' if r.filtered else ', 조건 없음'}"
+            objs = ", ".join(r.objects[:4]) + (f" 외 {len(r.objects) - 4}" if len(r.objects) > 4 else "")
+            bits.append(f"원격[{objs or '?'}{' 전체 스캔' if r.full_scan else ''}"
+                        f"{'' if r.filtered else ', 선택 조건 없음'}{'' if r.has_plan else ', 원격 계획 없음'}"
                         + (f", 원격 추정 {r.cardinality:,}행" if r.cardinality is not None else "") + "]")
+        elif self.remote_origins:
+            bits.append(f"원격 데이터(단계 {', '.join(self.remote_origins)})")
         if self.top_n is not None:
             bits.append(f"TOP {self.top_n}")
         if self.est_time is not None:
@@ -255,13 +259,21 @@ class HelpStat:
 
 @dataclass
 class RemotePlan:
-    """The remote system's plan embedded in a QueryGrid step."""
+    """The remote system's plan embedded in a QueryGrid step.
+
+    Connectors differ: Oracle sends `Query steps:` plus EXPLAIN PLAN rows
+    (`[... Operation=TABLE ACCESS, Options=FULL, Object_Owner=X, Object_Name=Y, Cardinality=n ...]`);
+    others (e.g. SQL Server) send only the remote SQL under `Remote Queries:` with
+    `[No explain information added from target]`."""
     raw: str
     sql: str = ""
     full_scan: bool = False
-    filtered: bool = False
-    cardinality: int | None = None
-    objects: list[str] = field(default_factory=list)
+    full_scan_objects: list[str] = field(default_factory=list)
+    filtered: bool = False              # the remote SQL has a selective predicate (not just IS [NOT] NULL)
+    cardinality: int | None = None      # remote optimizer's estimate for the whole query
+    objects: list[str] = field(default_factory=list)   # remote tables (indexes excluded)
+    has_plan: bool = True
+    wide_columns: list[str] = field(default_factory=list)  # VARCHAR(MAX)/CLOB-like expressions in the remote SQL
 
 
 @dataclass
@@ -385,6 +397,8 @@ def _parse_step(label: str, text: str) -> Step:
         st.top_n = int(m.group(1))
     st.inputs = [int(n) for n in _SPOOL_IN.findall(masked)]
     st.outputs = [int(n) for n in _SPOOL_OUT.findall(masked)]
+    if not st.outputs:  # e.g. QueryGrid import steps only say "The size of Spool 2 is estimated ..."
+        st.outputs = [int(n) for n in re.findall(r"size of Spool (\d+) is estimated", masked, re.I)]
     return st
 
 
@@ -423,22 +437,51 @@ def _parse_helpstats(tail: str) -> list[HelpStat]:
     return sorted(out, key=lambda h: h.priority)
 
 
+_NULL_CHECK = re.compile(r"NOT\s*\(\s*[\w$#.\"]+\s+IS\s+NULL\s*\)|[\w$#.\"]+\s+IS\s+(?:NOT\s+)?NULL", re.I)
+_PREDICATE = re.compile(r"(?:=|<>|!=|<|>|\bLIKE\b|\bIN\s*\(|\bBETWEEN\b|\bEXISTS\b)", re.I)
+_WIDE = re.compile(r"\bN?VARCHAR2?\s*\(\s*MAX\s*\)|\b(?:N?CLOB|N?TEXT|LONG|XMLTYPE)\b", re.I)
+
+
+def _selective_where(sql: str) -> bool:
+    """WHERE with a real filter - remote dictionary views often only add IS NOT NULL checks."""
+    m = re.search(r"\bWHERE\b(.*)", sql, re.I | re.S)
+    if not m:
+        return False
+    return bool(_PREDICATE.search(_NULL_CHECK.sub(" ", m.group(1))))
+
+
 def _parse_remote(raw: str) -> RemotePlan:
     flat = re.sub(r"\s+", " ", raw).strip()
     rp = RemotePlan(raw=raw.strip())
     m = re.search(r"Query steps:\s*(.*?)(?:Remote Queries:|$)", flat, re.I)
     if m:
-        rp.sql = re.sub(r"/\*.*?\*/", "", m.group(1)).strip()
-    # Oracle-style plan rows (Operation=TABLE ACCESS, Options=FULL ...), generic "TableScan" for other engines
-    rp.full_scan = bool(re.search(r"Operation=TABLE ACCESS,\s*Options=FULL|\bTableScan\b|\bFull Table Scan\b", flat, re.I))
-    preds = re.findall(r"(?:Access|Filter)_Predicates=([^,\]]*)", flat)
-    rp.filtered = any(p.strip() for p in preds) or bool(re.search(r"\bWHERE\b", rp.sql, re.I))
-    cards = [int(c) for c in re.findall(r"Cardinality=(\d+)", flat)]
-    rp.cardinality = cards[0] if cards else None
-    rp.objects = list(dict.fromkeys(
-        f"{o}.{n}" for o, n in re.findall(r"Object_Owner=([\w$#]+), Object_Name=([\w$#]+)", flat)))
+        rp.sql = m.group(1)
+    else:  # no plan, just the remote SQL: "Remote Queries: 1. SELECT ... [No explain information ...]"
+        m = re.search(r"Remote Queries:\s*(?:1\.\s*)?(.*?)(?:\[No explain information[^\]]*\]|\s2\.\s*\[|$)", flat, re.I)
+        rp.sql = m.group(1) if m else ""
+    rp.sql = re.sub(r"/\*.*?\*/", "", rp.sql).strip()
+    rp.has_plan = "Operation=" in flat or bool(re.search(r"\bTableScan\b", flat))
+
+    rows = [dict(re.findall(r"(\w+)=([^,\]]*)", r)) for r in re.split(r"(?=Statement_ID=)", flat) if "Operation=" in r]
+    for r in rows:
+        op, opts = r.get("Operation", "").upper(), r.get("Options", "").upper()
+        name = f"{r.get('Object_Owner', '').strip()}.{r.get('Object_Name', '').strip()}".strip(".")
+        if op.startswith("TABLE ACCESS") and name:
+            rp.objects.append(name)
+            if "FULL" in opts:
+                rp.full_scan_objects.append(name)
+    if re.search(r"\bTableScan\b|\bFull Table Scan\b", flat, re.I):
+        rp.full_scan = True
+    rp.full_scan = rp.full_scan or bool(rp.full_scan_objects)
+    rp.objects = list(dict.fromkeys(rp.objects))
+    rp.full_scan_objects = list(dict.fromkeys(rp.full_scan_objects))
+    top = next((r for r in rows if r.get("ID", "").strip() == "0"), rows[0] if rows else None)
+    if top and top.get("Cardinality", "").strip().isdigit():
+        rp.cardinality = int(top["Cardinality"])
     if not rp.objects and rp.sql:
-        rp.objects = list(dict.fromkeys(re.findall(r"\bFROM\s+([\w$#]+\.[\w$#]+)", rp.sql, re.I)))
+        rp.objects = list(dict.fromkeys(re.findall(r"\b(?:FROM|JOIN)\s+([\w$#]+\.[\w$#]+)", rp.sql, re.I)))
+    rp.filtered = _selective_where(rp.sql)
+    rp.wide_columns = list(dict.fromkeys(m.group(0) for m in _WIDE.finditer(rp.sql)))
     return rp
 
 
@@ -462,11 +505,15 @@ def parse_explain(text: str) -> ParsedExplain:
             st.remote = remotes[int(m.group(1))]
     sizes = _spool_sizes(steps)
     spool_tables: dict[int, list[str]] = {}
+    spool_remote: dict[int, list[str]] = {}
     for st in steps:
         lineage = list(dict.fromkeys(st.tables + [t for n in st.inputs for t in spool_tables.get(n, [])]))
         st.lineage = lineage
+        origins = ([st.label] if st.remote is not None else []) + [o for n in st.inputs for o in spool_remote.get(n, [])]
+        st.remote_origins = list(dict.fromkeys(origins))
         for n in st.outputs:
             spool_tables[n] = lineage
+            spool_remote[n] = st.remote_origins
         if st.join_method:
             n_base = sum(1 for s in st.scans)
             st.input_rows = [sizes.get(n) for n in st.inputs[:2]] + [None] * min(n_base, max(0, 2 - len(st.inputs)))

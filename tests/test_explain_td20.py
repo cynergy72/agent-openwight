@@ -193,3 +193,42 @@ def test_querygrid_with_pushed_predicate_is_not_full_transfer():
     p = parse_explain(filtered)
     assert p.step("1").remote.filtered
     assert "REMOTE_FULL_TRANSFER" not in {x.code for x in from_explain(p, TuningConfig())}
+
+
+# ------------------------------------------------------------------ QueryGrid joins (ETL extract of remote catalogs)
+QG_JOIN = (ROOT / "tests/fixtures/explain_td20_qg_join.txt").read_text()
+
+
+def test_remote_plan_rows_and_no_plan_connector():
+    p = parse_explain(QG_JOIN)
+    oracle, mssql = p.step("3").remote, p.step("4").remote
+    assert oracle.objects == ["SYS.OBJ$", "SYS.COL$"]            # index rows (I_OBJ1) excluded
+    assert oracle.full_scan_objects == ["SYS.COL$"] and oracle.cardinality == 7
+    assert not oracle.filtered                                     # only IS NOT NULL checks
+    assert oracle.has_plan and not oracle.wide_columns
+    assert not mssql.has_plan and mssql.wide_columns == ["VARCHAR(Max)"]
+    assert mssql.objects == ["sys.tables", "sys.schemas", "sys.extended_properties"]
+    assert p.step("3").outputs == [2] and p.step("4").outputs == [3]
+
+
+def test_remote_origins_flow_through_spools():
+    p = parse_explain(QG_JOIN)
+    assert p.step("5").remote_origins == ["3", "4"] and p.step("5").lineage == []
+    assert p.step("6").remote_origins == ["3", "4"] and p.step("6").target == "SALES_DB.SOURCE_COLUMNS"
+    assert p.step("5").input_rows == [60_000, 60_000] and p.step("5").est_time == 2651.24
+
+
+def test_remote_estimate_join_replaces_guessed_size_findings():
+    f = from_explain(parse_explain(QG_JOIN), TuningConfig())
+    codes = [x.code for x in f]
+    j = next(x for x in f if x.code == "REMOTE_ESTIMATE_JOIN")
+    assert j.severity == "critical" and j.step == "5"
+    assert "14,696,939행" in j.detail and "원격 7행" in j.detail and "원격 ?" in j.detail
+    # sizes computed from no-confidence remote guesses are not reported as their own problems
+    assert not {"LARGE_SPOOL", "REDISTRIBUTE_LARGE", "STATS_NO_CONFIDENCE"} & set(codes)
+    wide = next(x for x in f if x.code == "REMOTE_WIDE_ROWS")
+    assert "VARCHAR(Max)" in wide.detail and wide.step == "4" and wide.severity == "warning"
+    full = next(x for x in f if x.code == "REMOTE_FULL_TRANSFER")
+    assert full.step == "3" and "SYS.COL$" in full.detail
+    conv = next(x for x in f if x.code == "JOIN_CONVERSION")
+    assert "Schema_Name LATIN_TO_UNICODE" in conv.detail and "원격 데이터" in conv.detail

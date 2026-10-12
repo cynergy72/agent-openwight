@@ -25,7 +25,7 @@ DBQL 고부하 쿼리 / 붙여넣은 SQL
 **문제가 있는지, 개선됐는지, 목표를 달성했는지는 모두 코드가 판정합니다.** LLM 은 재작성과 설명만 맡습니다.
 작은 모델이 "다 됐다"고 해도 EXPLAIN 지표가 나아지지 않으면 채택하지 않습니다.
 
-## 2. 튜닝 지식 = 스킬 (`skills/*.md`, 20개 · 튜닝 포인트 84개)
+## 2. 튜닝 지식 = 스킬 (`skills/*.md`, 20개 · 튜닝 포인트 85개)
 
 | 분류 | 스킬 | 내용 | TP 수 |
 |---|---|---|---|
@@ -37,7 +37,7 @@ DBQL 고부하 쿼리 / 붙여넣은 SQL
 | 조인 | `outer-join` | WHERE 의 안쪽 테이블 조건, ON 절 오해, 불필요한 OUTER JOIN | 4 |
 | 접근경로 | `predicates` | sargability - 컬럼 함수, 암시적 형변환, 선행 % LIKE, OR 조건, 대형 IN 리스트 | 5 |
 | 접근경로 | `partitioning` | 파티션 제거 확보, 파티션 미사용 전체 스캔, 파티션 추가 설계·마이그레이션 | 5 |
-| 접근경로 | `querygrid` | QueryGrid 원격 조회 - 원격 계획 읽기, 컬럼·조건 pushdown, 원격 전체 스캔, 원격 결과와 로컬 조인 | 5 |
+| 접근경로 | `querygrid` | QueryGrid 원격 조회 - 원격 계획 읽기, 컬럼·조건 pushdown, 원격 전체 스캔, 원격 추정 오류와 조인, 넓은 원격 컬럼 | 6 |
 | 접근경로 | `indexes` | USI/NUSI, Join Index, Aggregate Join Index 사용 조건과 유지 비용 | 4 |
 | 통계 | `statistics` | 수집 대상 우선순위, 문법, HELPSTATS 선별, SUMMARY 통계, 신뢰도, 오래된 통계, 다중 컬럼 통계 | 6 |
 | 분산 | `skew` | 테이블 PI 스큐, 조인/집계 키 쏠림, NULL·기본값, 스풀 부족(2646), PRPD | 5 |
@@ -73,7 +73,7 @@ DBQL 고부하 쿼리 / 붙여넣은 SQL
 |---|---|
 | EXPLAIN | product join (TP-JOIN-01/05, 입력 스풀 행 수로 크기 판단 - 몇 행짜리는 info), 소수 AMP 재분배 (TP-SKEW-06), 넓은 행 스풀 (bytes 기준), 대용량 복제 (TP-JOIN-12), 대용량 재분배 (TP-JOIN-11), 조인 형변환 (TP-JOIN-13), 파티션 테이블 전체 스캔 (TP-PART-01/02), 파티션 없는 대용량 전체 스캔 (TP-PART-05), no/low confidence (TP-STAT-01/02), HELPSTATS 권고 (TP-STAT-03), 대용량 스풀 (TP-RES-01), 병목 단계 (TP-EXP-01) |
 | SQL 패턴 | 콤마 조인·조건 누락, OR 조인, 비동등 조인, 함수 조인, 컬럼 함수 조건(파티션 컬럼이면 critical), 문자 컬럼 vs 숫자 상수, 선행 % LIKE, 다른 컬럼 OR, 대형 IN, OUTER JOIN 의 WHERE 조건, 안 쓰는 OUTER JOIN, NOT IN 서브쿼리, 상관/스칼라 서브쿼리, **중간 결과의 안 쓰는 컬럼**, SELECT *, 반복 스캔, UNION, DISTINCT, PARTITION BY 없는 윈도우, UPDATE-조인, 전체 DELETE |
-| QueryGrid | 원격 조회(원격 계획·원격 추정 행 수 대비), 원격 테이블 조건 없는 전체 전송 (TP-QG-01~03) |
+| QueryGrid | 원격 조회(원격 계획·원격 추정 행 수 대비), 원격 테이블 조건 없는 전체 전송 (TP-QG-01~03), **원격 추정에 기댄 조인/집계 폭증** (TP-QG-04), 원격 결과 행 폭 과다·`VARCHAR(MAX)` (TP-QG-06) |
 | DBQL | CPU/IO 스큐, PJI ≥ 3 (product join 의심), UII ≥ 3 (불필요 IO 의심) |
 | 테이블 | AMP 간 용량 스큐 (DBC.TableSizeV) → PI 검토 |
 
@@ -239,15 +239,19 @@ tdagent -v chat                                # 도구 결과까지 보기
 
 ### EXPLAIN 파서 검증
 
-Teradata 20.0 실제 EXPLAIN 57건(성공 45, 권한/객체 오류 12)으로 보정했습니다. 그중 11건은
-`DIAGNOSTIC HELPSTATS ON FOR SESSION` 상태로 추출한 INSERT-SELECT, DELETE ALL, 매크로 EXEC, QueryGrid 조회입니다. 뷰 별칭(`DB.A in view V`),
+Teradata 20.0 실제 EXPLAIN 77건(성공 65, 권한/객체 오류 12)으로 보정했습니다. 그중 31건은
+`DIAGNOSTIC HELPSTATS ON FOR SESSION` 상태로 추출한 INSERT-SELECT, DELETE ALL, 매크로 EXEC, QueryGrid(Oracle·SQL Server)
+원격 카탈로그 적재 ETL 입니다. 뷰 별칭(`DB.A in view V`),
 스풀 번호 없는 크기 문구, 키 없는/상수 키 재분배(`to few AMPs`), OUTER JOIN 방식, `all partitions`/초대형 파티션 수,
 총 예상 시간이 없는 계획(단계 합으로 대체), IPE 머리말, 조건·재분배 키 안의 `TRIM(BOTH FROM ...)` 를 처리합니다.
 스풀 번호를 따라가며 단계별 입력 행 수와 원천 테이블(lineage)을 계산해 product join 크기와 통계 권고 대상에 씁니다.
 HELPSTATS 는 여러 줄로 이어진 권고, `COLLECT SUMMARY STATISTICS`, 신뢰도(High/Medium), FINAL PLAN / OTHER PLANS 구분을 읽고,
 **우선 적용**(High + 최종 계획 + 4개 이하 컬럼, SUMMARY)과 **선택 검토**(Medium, 다른 계획용, 5개 이상 컬럼 조합,
 `DBC.` 딕셔너리)로 나눕니다. DML 단계(`MERGE step into T`, `INSERT step into T`, `full table deletion`)와
-QueryGrid 원격 계획 블록(`BEGIN EXPLAIN FOR REMOTE QUERY`)도 구조화합니다.
+QueryGrid 원격 계획 블록(`BEGIN EXPLAIN FOR REMOTE QUERY`)도 구조화합니다 (Oracle 계획 행의 테이블/인덱스 구분, 전체 스캔,
+원격 추정 행 수, 계획을 주지 않는 커넥터, `IS NOT NULL` 뿐인 조건은 "선택 조건 없음"). 원격 데이터가 어느 단계로 흘러가는지
+추적해서, 원격 추정(no confidence 60,000행)으로 부풀려진 조인을 하나의 문제(REMOTE_ESTIMATE_JOIN)로 보고하고 거기서 파생된
+대용량 스풀·재분배·통계 경고는 따로 내지 않습니다.
 
 새 환경의 EXPLAIN 을 추출하면 `tdagent explain-check` 로 놓치는 문구가 있는지 바로 확인할 수 있고,
 `TDAGENT_EXPLAIN_CORPUS=<파일1>:<파일2> pytest` 로 회귀 테스트에 넣을 수 있습니다 (사내 정보가 담긴 원본은 저장소에 넣지 않음).
