@@ -1,6 +1,7 @@
 ---
 name: teradata-sql-dialect
 description: Teradata SQL dialect rules (TOP/QUALIFY, dates, strings, casts, volatile tables) - always applied when writing SQL
+category: 방언
 always: true
 always_tuning: true
 ---

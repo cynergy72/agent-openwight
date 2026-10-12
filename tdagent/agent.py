@@ -20,6 +20,7 @@ from .config import AgentConfig, Config
 from .llm import ChatModel, LLMReply, OpenAICompatModel
 from .prompts import build_system_prompt
 from .schema import SchemaStore
+from .skills import SkillLibrary
 from .sql_lint import extract_sql_blocks, normalize_sql
 from .teradata import TeradataClient
 from .tools import Toolbox, Validation
@@ -141,13 +142,15 @@ def load_knowledge(directory: Path, max_chars: int = 8000) -> str:
 def build_agent(cfg: Config, model: ChatModel | None = None,
                 on_event: EventHandler | None = None) -> Agent:
     store = SchemaStore.load_dir(cfg.path(cfg.agent.schema_dir))
-    td = TeradataClient(cfg.teradata) if cfg.teradata.enabled else None
+    skills = SkillLibrary.load_dir(cfg.path(cfg.tuning.skills_dir))
+    td = TeradataClient(cfg.teradata, helpstats=cfg.tuning.helpstats) if cfg.teradata.enabled else None
     toolbox = Toolbox(store, td, allow_execute=cfg.teradata.allow_execute,
-                      output_chars=cfg.agent.tool_output_chars)
+                      output_chars=cfg.agent.tool_output_chars, skills=skills)
     prompt = build_system_prompt(
         knowledge=load_knowledge(cfg.path(cfg.agent.knowledge_dir)),
         schema_overview=store.overview() if len(store) else "",
         explain_enabled=td is not None,
         execute_enabled=toolbox.allow_execute,
+        skills=skills,
     )
     return Agent(model or OpenAICompatModel(cfg.llm), toolbox, cfg.agent, prompt, on_event)

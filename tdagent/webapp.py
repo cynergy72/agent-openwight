@@ -1,7 +1,9 @@
 """Local web UI (Streamlit). Start with `tdagent web`.
 
-Left: chat with the agent. Right: the "current SQL" - the target of the next
-modify/analyze request - with copy, edit, validate, EXPLAIN, diff and run.
+Modes (sidebar):
+  🔧 튜닝      - DBQL / pasted SQL → findings matched to tuning points → goal loop → report
+  ✍️ SQL 작성  - chat on the left, the "current SQL" on the right (copy, edit, validate, EXPLAIN, diff, run)
+  📚 튜닝 지식 - the skills/ knowledge base the agent applies
 """
 
 from __future__ import annotations
@@ -22,10 +24,13 @@ from tdagent.agent import Agent, build_agent
 from tdagent.config import TeradataConfig, load_config, save_teradata_settings
 from tdagent.sql_lint import explain_hints, normalize_sql
 from tdagent.teradata import TeradataClient, TeradataError
+from tdagent.webui_tuning import render_knowledge, render_tuning
 
-st.set_page_config(page_title="Teradata SQL Agent", page_icon="🗄️", layout="wide")
+st.set_page_config(page_title="Teradata Tuning Agent", page_icon="🗄️", layout="wide")
 
 ss = st.session_state
+
+MODES = ["🔧 튜닝", "✍️ SQL 작성", "📚 튜닝 지식"]
 
 
 # --------------------------------------------------------------------------- #
@@ -47,6 +52,7 @@ def _init_state() -> None:
         "edit_mode": False,
         "sql_editor": "",
         "attach_sql": True,
+        "mode": MODES[0],
     }
     for k, v in defaults.items():
         ss.setdefault(k, v)
@@ -180,23 +186,27 @@ def _ask(agent: Agent, prompt: str) -> None:
 def _sidebar() -> None:
     cfg, toolbox = ss.cfg, ss.agent.toolbox
     with st.sidebar:
-        st.header("Teradata SQL Agent")
+        st.header("Teradata Tuning Agent")
+        st.radio("모드", MODES, key="mode", label_visibility="collapsed")
+        st.divider()
         st.markdown(f"**모델** `{cfg.llm.model}`  \n`{cfg.llm.base_url}`")
-        st.markdown(f"**스키마** 테이블 {len(toolbox.store)}개")
+        st.markdown(f"**스키마** 테이블 {len(toolbox.store)}개 · **스킬** {len(toolbox.skills)}개")
         if toolbox.td:
             st.markdown(f"**Teradata** `{cfg.teradata.host}`  \n"
                         f"EXPLAIN 사용 · 실행 {'허용' if toolbox.allow_execute else '안 함'}")
         else:
             st.markdown("**Teradata** 미연결 (정적 검사 + 카탈로그 검사)")
         st.divider()
-        st.button("🆕 새 쿼리 (대화 초기화)", on_click=_new_query, width="stretch")
+        if ss.mode == MODES[1]:
+            st.button("🆕 새 쿼리 (대화 초기화)", on_click=_new_query, width="stretch")
         if st.button("🔁 스키마·지식 다시 읽기", width="stretch",
-                     help="schema/, knowledge/ 폴더를 수정한 뒤 누르세요. 대화도 초기화됩니다."):
+                     help="schema/, knowledge/, skills/ 폴더를 수정한 뒤 누르세요. 대화도 초기화됩니다."):
             _rebuild_agent(keep_history=False)
             _new_query()
             st.rerun()
         _connection_panel()
-        st.caption("요청 입력창에서 Shift+Enter 로 줄바꿈, SQL 을 그대로 붙여넣어도 됩니다.")
+        if ss.mode == MODES[1]:
+            st.caption("요청 입력창에서 Shift+Enter 로 줄바꿈, SQL 을 그대로 붙여넣어도 됩니다.")
 
 
 # --------------------------------------------------------------------------- #
@@ -435,11 +445,16 @@ def _sql_column() -> None:
 def main() -> None:
     _init_state()
     _sidebar()
-    left, right = st.columns([1, 1], gap="large")
-    with left:
-        _chat_column()
-    with right:
-        _sql_column()
+    if ss.mode == MODES[0]:
+        render_tuning()
+    elif ss.mode == MODES[2]:
+        render_knowledge()
+    else:
+        left, right = st.columns([1, 1], gap="large")
+        with left:
+            _chat_column()
+        with right:
+            _sql_column()
 
 
 main()

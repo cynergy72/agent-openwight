@@ -366,7 +366,7 @@ class TuningSession:
         parts = [f"## 목표\n{r.goal.describe()}",
                  "## 목표 판정\n" + "\n".join(f"- {'✅' if c.met else '❌'} {c.name}: {c.detail}" for c in r.criteria),
                  f"종료 사유: {r.stop_reason}. EXPLAIN 검증: {'예' if r.verified else '아니오'}",
-                 "## 지표 (원본 → 최종)\n" + metrics_table(r.original.metrics, r.best.metrics)]
+                 "## 지표 (원본 → 최종)\n" + metrics_table(r.original.metrics, final_metrics(r))]
         if r.dbql:
             parts.append("## DBQL 지표\n" + ", ".join(f"{k}={v}" for k, v in r.dbql.items() if k != "SqlPreview"))
         parts.append("## 원본의 튜닝 포인트\n" + "\n".join(f.render() for f in r.original.findings[:25]))
@@ -387,25 +387,33 @@ class TuningSession:
         return "\n\n".join(parts)
 
 
-def metrics_table(before: dict, after: dict) -> str:
+def metrics_table(before: dict, after: dict | None) -> str:
+    """Before/after plan metrics; only the original column when nothing was accepted."""
     labels = [("total_time", "총 예상 시간(s)"), ("product_joins", "product join"), ("full_scans", "전체 스캔"),
               ("partition_misses", "파티션 미적용 스캔"), ("no_confidence_steps", "no confidence 단계"),
               ("max_duplicated_rows", "최대 복제 행"), ("max_redistributed_rows", "최대 재분배 행"),
               ("max_spool_rows", "최대 스풀 행")]
-    rows = ["| 지표 | 원본 | 최종 |", "|---|---|---|"]
+    def fmt(v):
+        return "-" if v is None else (f"{v:,.2f}" if isinstance(v, float) else f"{v:,}")
+
+    rows = ["| 지표 | 원본 | 최종 |", "|---|---|---|"] if after is not None else ["| 지표 | 원본 |", "|---|---|"]
     for k, label in labels:
-        b, a = before.get(k), after.get(k)
+        b = before.get(k)
+        a = after.get(k) if after is not None else None
         if b is None and a is None:
             continue
-        fmt = (lambda v: "-" if v is None else (f"{v:,.2f}" if isinstance(v, float) else f"{v:,}"))
-        rows.append(f"| {label} | {fmt(b)} | {fmt(a)} |")
+        rows.append(f"| {label} | {fmt(b)} | {fmt(a)} |" if after is not None else f"| {label} | {fmt(b)} |")
     return "\n".join(rows)
+
+
+def final_metrics(r: "TuningReport") -> dict | None:
+    return r.best.metrics if r.best_attempt else None
 
 
 def fallback_report(r: TuningReport) -> str:
     lines = ["## 요약", f"- 목표: {r.goal.describe()}",
-             f"- 결과: {'목표 달성' if r.goal_met else '목표 미달성'} ({r.stop_reason})", "", metrics_table(
-                 r.original.metrics, r.best.metrics), "", "## 튜닝 포인트"]
+             f"- 결과: {'목표 달성' if r.goal_met else '목표 미달성'} ({r.stop_reason})", "",
+             metrics_table(r.original.metrics, final_metrics(r)), "", "## 튜닝 포인트"]
     lines += [f"- {SEVERITY_ICON[f.severity]} {f.code} {f.title} ({', '.join(f.tuning_points)}): {f.detail}"
               for f in r.original.findings]
     if r.recommendations.stats:

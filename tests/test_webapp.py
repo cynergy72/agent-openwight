@@ -41,6 +41,7 @@ def start(replies, source=None):
     at = AppTest.from_file(APP, default_timeout=30)
     at.session_state["cfg"] = cfg
     at.session_state["agent"] = build_agent(cfg, model=model)
+    at.session_state["mode"] = "✍️ SQL 작성"
     at.run()
     assert not at.exception
     return at, model
@@ -95,6 +96,7 @@ def test_llm_failure_is_shown_not_crashing():
     at = AppTest.from_file(APP, default_timeout=30)
     at.session_state["cfg"] = cfg
     at.session_state["agent"] = build_agent(cfg, model=Down())
+    at.session_state["mode"] = "✍️ SQL 작성"
     at.run()
     at.chat_input[0].set_value("아무거나").run()
     assert not at.exception

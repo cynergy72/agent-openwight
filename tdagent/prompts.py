@@ -37,7 +37,7 @@ You are a senior Teradata SQL engineer working as an agent. You help with three 
 - search_schema(query): find tables/columns by keyword (Korean or English). Use it before writing SQL.
 - describe_table(table): get columns, types, primary index and comments for one table.
 - validate_sql(sql): static Teradata checks{explain_note}.
-{execute_note}
+{execute_note}{skill_note}
 ## Workflow
 1. Identify the request type. For WRITE, find the right tables with search_schema, then describe_table them.
    Never invent table or column names. If the schema doesn't have what is needed, say so and use a clearly
@@ -57,13 +57,22 @@ Keep it concise. Comment non-obvious parts of the SQL with `--`.
 
 
 def build_system_prompt(*, knowledge: str, schema_overview: str,
-                        explain_enabled: bool, execute_enabled: bool) -> str:
+                        explain_enabled: bool, execute_enabled: bool, skills=None) -> str:
+    always = skills.always() if skills is not None else []
+    cheatsheet = "\n\n".join(s.body for s in always) if always else TERADATA_CHEATSHEET
+    skill_note = ""
+    if skills is not None and len(skills):
+        skill_note = ("- load_skill(name): read a Teradata knowledge skill when the request needs it "
+                      "(performance, EXPLAIN, statistics, partitions ...). Available skills:\n"
+                      + "\n".join(f"  - {s.name}: {s.description}" for s in skills.skills.values() if not s.always)
+                      + "\n")
     prompt = SYSTEM_PROMPT.format(
         explain_note=" and, when connected, a real Teradata EXPLAIN (catches missing objects, syntax errors) "
                      "with plan hints" if explain_enabled else "",
         execute_note="- run_query(sql): run a read-only SELECT and see up to a few rows. Use it to check codes/values, "
                      "not to dump data.\n" if execute_enabled else "",
-        cheatsheet=TERADATA_CHEATSHEET,
+        skill_note=skill_note,
+        cheatsheet=cheatsheet,
     )
     if schema_overview:
         prompt += "\n## Available tables (use search_schema / describe_table for details)\n" + schema_overview + "\n"

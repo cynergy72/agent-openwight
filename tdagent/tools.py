@@ -53,8 +53,9 @@ def _fn(name: str, description: str, props: dict, required: list[str]) -> dict:
 
 class Toolbox:
     def __init__(self, store: SchemaStore, td: TeradataClient | None = None,
-                 allow_execute: bool = False, output_chars: int = 6000):
+                 allow_execute: bool = False, output_chars: int = 6000, skills=None):
         self.store = store
+        self.skills = skills
         self.td = td
         self.allow_execute = allow_execute and td is not None
         self.output_chars = output_chars
@@ -71,6 +72,10 @@ class Toolbox:
                 + (" and run EXPLAIN on the real database" if self.td else "") + ".",
                 {"sql": {"type": "string"}}, ["sql"]),
         ]
+        if self.skills is not None and len(self.skills):
+            specs.append(_fn("load_skill", "Read a Teradata knowledge skill (tuning points, EXPLAIN reading, "
+                             "statistics, partitioning ...) by name.",
+                             {"name": {"type": "string", "description": "skill name from the list"}}, ["name"]))
         if self.allow_execute:
             specs.append(_fn("run_query", "Run a read-only SELECT and return at most a few rows. "
                              "Use for checking code values or sanity checks only.",
@@ -86,7 +91,8 @@ class Toolbox:
         except (json.JSONDecodeError, ValueError) as e:
             return f"ERROR: 인자 JSON 을 해석할 수 없습니다 ({e}). 올바른 JSON 객체로 다시 호출하세요."
         handler = getattr(self, f"tool_{name}", None)
-        if handler is None or (name == "run_query" and not self.allow_execute):
+        if handler is None or (name == "run_query" and not self.allow_execute) or \
+                (name == "load_skill" and self.skills is None):
             return f"ERROR: 알 수 없는 도구 '{name}'. 사용 가능: {', '.join(s['function']['name'] for s in self.specs())}"
         try:
             out = handler(**args)
@@ -119,6 +125,12 @@ class Toolbox:
         if t is None:
             return f"'{table}' 테이블을 찾을 수 없습니다. search_schema 로 검색하세요."
         return t.render()
+
+    def tool_load_skill(self, name: str) -> str:
+        skill = self.skills.get(name)
+        if skill is None:
+            return f"'{name}' 스킬이 없습니다. 사용 가능: {', '.join(self.skills.skills)}"
+        return skill.body
 
     def tool_validate_sql(self, sql: str) -> str:
         return self.validate(sql).render()
